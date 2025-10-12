@@ -34,36 +34,20 @@ def demand_graph(df):
 
     return demands
 
-
-
+def make_hit_map(df):
+    """
+    xpos, ypos를 좌표평면에 점으로 찍어서 보여주는 함수
+    """
+    plt.figure(figsize=(10, 10))
+    plt.scatter(df['xpos'], df['ypos'], s=2, alpha=0.5)
+    plt.xlabel('xpos')
+    plt.ylabel('ypos')
+    plt.title('Hit Map (Scatter Plot of xpos vs ypos)')
+    plt.grid(True)
+    plt.show()
 
 if __name__ == "__main__":
-    csv_path = Path('../data') / 'changed_time_format.csv'
+    csv_path = Path('../data') / 'essential_columns.csv'
     df = pd.read_csv(csv_path, encoding='cp949')
-    demands = demand_graph(df)
-    t_space = np.arange(len(demands))
-    y_space = np.array(demands)
+    make_hit_map(df)
 
-    # 주기(시간 단위): 1~672 (1시간~4주)
-    periods = np.arange(1, 24 * 28 + 1)
-    frequencies = 1 / periods
-
-    mid_real = []
-    mid_imag = []
-
-    for freq in frequencies:
-        real, imag = map_to_complex_plane(t_space, y_space, freq)
-        mid_real.append(middle_point(real))
-        mid_imag.append(middle_point(imag))
-
-    # 결과 시각화
-    plt.figure(figsize=(16, 6))
-    plt.plot(periods, np.abs(mid_real), label='Real (abs)')
-    plt.plot(periods, np.abs(mid_imag), label='Imag (abs)')
-    plt.xlabel('Period (hours)')
-    plt.ylabel('Mean Value')
-    plt.title('Fourier Transform of Demand (1h ~ 4weeks)')
-    plt.legend()
-    plt.grid()
-    plt.savefig('fourier_transform_demand.png')
-    plt.show()

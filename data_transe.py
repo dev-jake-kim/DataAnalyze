@@ -154,25 +154,16 @@ def change_time_format():
     df['call_date'] = df['call_date'].dt.strftime('%Y-%m-%d %H')
     df.to_csv('data/changed_time_format.csv', index=False, encoding='cp949')
 
+def drop_nonessential_columns():
+    essential_columns = ['clientid', 'call_date', 'xpos', 'ypos']
+    df_filtered = df[essential_columns]
+    minX= df['xpos'].min()
+    minY= df['ypos'].min()
+    df_filtered['xpos'] = df_filtered['xpos'].apply(lambda x: x - minX)
+    df_filtered['ypos'] = df_filtered['ypos'].apply(lambda y: y - minY)
+
+    df_filtered.to_csv('data/essential_columns.csv', index=False, encoding='cp949')
+
 
 if __name__ == "__main__":
-    # print_dataframe()
-    # print_head()
-    # proceed_first()
-    # eleminate_duplicates()
-    # get_min_max()
-    # x_range = (128953279, 129488642) #range 535,363
-    # y_range = (35321525, 35754835) #range 433,310
-    # visualize_data()
-    # k_mean_analize()
-    # x_mid, y_mid = 129326777, 35547791
-    # print(x_mid, y_mid)
-    # visualize_data(x_mid, y_mid)
-
-    # crop(0.8)
-
-    visualize_data()
-    # get_min_max()
-
-    # change_time_format()
-    # print_dataframe()
+    drop_nonessential_columns()
