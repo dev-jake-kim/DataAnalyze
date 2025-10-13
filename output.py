@@ -6,9 +6,9 @@ from datetime import datetime
 from math import sqrt
 from typing import List, Tuple, Dict, Any
 
-R = float('inf')
-MAX_CONNECT_DIST = 10000000
-MIN_DATA = 1
+R = 1_000
+MAX_CONNECT_DIST = 5_000
+MIN_DATA = 100
 
 class OutJson:
     def __init__(self, minHour, maxHour, self_loop_w=1.0, total_nodes=0, edges=None, demands=None):
@@ -43,7 +43,12 @@ class OutJson:
     def save_json(self, path: Path):
         import json
         with open(path, 'w', encoding='utf-8') as f:
-            json.dump(self.to_dict(), f, ensure_ascii=False, indent=4)
+            json.dump(
+                self.to_dict(),
+                f,
+                ensure_ascii=False,
+                separators=(',', ':')  # 공백 제거(콤마/콜론 뒤 공백 없음)
+            )
 
 def distance(a: Tuple[int, int], b: Tuple[int, int]) -> float:
     """2차원 점 a와 b(형상 (2,)) 사이의 유클리드 거리를 반환합니다."""
@@ -135,15 +140,23 @@ if __name__ == "__main__":
     print('Total edges:', len(edges))
 
     #각 ptr에 할당된 data들의 시간 정보를 dense하게 만듦
-    demands = []
+    idx_to_time = times.set_index("idx")["time"]
+
+    # 총 시간 수(시간 단위)
     total_hours = int((max_time - min_time).total_seconds() // 3600) + 1
-    for data_idxs in tqdm(ptr_datas, desc="Creating demands"):
-        demand = [0] * total_hours
-        for data_idx in data_idxs:
-            time = times[times['idx'] == data_idx]['time'].values[0]
-            hour_diff = int((time - min_time).total_seconds() // 3600)
-            demand[hour_diff] += 1
-        demands.append(demand)
+
+    # \`demands\`: 시간(granularity 1시간) × 유효 ptr 개수
+    demands = [[0] * len(valid_ptrs) for _ in range(total_hours)]
+
+    # 각 ptr에 할당된 data의 시간을 시간 인덱스로 변환해 카운트
+    for ptr_idx, data_indices in enumerate(ptr_datas):
+        for data_idx in data_indices:
+            t = idx_to_time.at[data_idx]
+            hour_idx = int((t - min_time).total_seconds() // 3600)
+            if 0 <= hour_idx < total_hours:
+                demands[hour_idx][ptr_idx] += 1
+
+
     outJson = OutJson(minHour=min_time, maxHour=max_time, self_loop_w=1.0, total_nodes=len(valid_ptrs), edges=edges, demands=demands)
     outJson.save_json(data_dir / 'output.json')
     print('Saved output.json')

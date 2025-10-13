@@ -7,12 +7,12 @@ from tqdm import tqdm
 # 설정값
 # ------------------------
 N = 200           # 포인터(ptr) 개수
-K = 50            # 각 이동 단계에서 선택할 최근접 K개
+K = 100            # 각 이동 단계에서 선택할 최근접 K개
 r = 1000.0        # 최종 할당 반경 r
 SEED = 42         # 재현을 위한 난수 시드
 EPSILON = 1e-6    # 수렴 허용오차(포인터 최대 이동량)
 MAX_ITERS = 100   # 외부 반복의 최대 횟수
-
+MIN_DIST = 100
 
 def distance(a: np.ndarray, b: np.ndarray) -> float:
     """2차원 점 a와 b(형상 (2,)) 사이의 유클리드 거리를 반환합니다."""
@@ -59,7 +59,7 @@ def move_ptrs_until_converged(ptrs: np.ndarray, data: np.ndarray, k: int, eps: f
         old_ptrs = ptrs.copy()
         new_data = data.copy()
 
-        for i in tqdm(range(len(ptrs)), desc="Move ptrs", unit="ptr", leave=False):
+        for i in range(len(ptrs)):
             if len(new_data) == 0:
                 break
             k_i = min(k, len(new_data))
@@ -124,6 +124,30 @@ def five_number_summary(values: np.ndarray):
     return tuple(float(x) for x in quantiles)
 
 
+def merge_close_ptrs(ptrs: np.ndarray, min_dist: float) -> np.ndarray:
+    """
+    ptrs 배열에서 min_dist 미만으로 가까운 포인터 쌍을 평균점으로 합칩니다.
+    더 이상 가까운 쌍이 없을 때까지 반복합니다.
+    """
+    while True:
+        n = len(ptrs)
+        if n < 2:
+            break
+        # 모든 쌍의 거리 계산
+        dists = np.linalg.norm(ptrs[:, None, :].astype(float) - ptrs[None, :, :].astype(float), axis=2)
+        np.fill_diagonal(dists, np.inf)  # 자기 자신 제외
+        i, j = np.unravel_index(np.argmin(dists), dists.shape)
+        if dists[i, j] >= min_dist:
+            break
+        # 평균점 계산
+        mean_point = np.rint((ptrs[i].astype(float) + ptrs[j].astype(float)) / 2).astype(int)
+        # 두 포인터 제거, 평균점 추가
+        mask = np.ones(n, dtype=bool)
+        mask[[i, j]] = False
+        ptrs = np.vstack([ptrs[mask], mean_point])
+    return ptrs
+
+
 if __name__ == "__main__":
     # 데이터 로드 (xpos, ypos만 사용)
     csv_path = Path('../data') / 'essential_columns.csv'
@@ -149,6 +173,9 @@ if __name__ == "__main__":
 
     # 수렴할 때까지 포인터 이동 반복
     ptrs = move_ptrs_until_converged(ptrs, points, K, EPSILON, MAX_ITERS)
+
+    # MIN_DIST 미만 가까운 포인터 병합
+    ptrs = merge_close_ptrs(ptrs, MIN_DIST)
 
     # 반경 r 이내로 최종 할당 수행
     assignments, distances_per_ptr = assign_points_to_ptrs(ptrs, points, r)
@@ -200,4 +227,3 @@ if __name__ == "__main__":
         print(f"Saved ptrs summary to {out_path.resolve()}")
     except Exception as e:
         print(f"Warning: failed to save ptrs summary: {e}")
-
