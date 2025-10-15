@@ -1,229 +1,227 @@
+import heapq
+
 import pandas as pd
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
+from visualize.grid2hitmap import plot_grid_hitmap
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+from outjson import OutJson
 
-# ------------------------
-# 설정값
-# ------------------------
-N = 200           # 포인터(ptr) 개수
-K = 100            # 각 이동 단계에서 선택할 최근접 K개
-r = 1000.0        # 최종 할당 반경 r
-SEED = 42         # 재현을 위한 난수 시드
-EPSILON = 1e-6    # 수렴 허용오차(포인터 최대 이동량)
-MAX_ITERS = 100   # 외부 반복의 최대 횟수
-MIN_DIST = 100
+#격자 크기
+GRID_X = 1000
+GRID_Y = 1000
 
-def distance(a: np.ndarray, b: np.ndarray) -> float:
-    """2차원 점 a와 b(형상 (2,)) 사이의 유클리드 거리를 반환합니다."""
-    return float(np.linalg.norm(a.astype(float) - b.astype(float)))
+#
+MIN_DATA_PER_NODE = 1000
+MAX_NODE_SIZE = 5
 
+MAX_DIST = 1000
 
-def select_k_nearest(points: np.ndarray, center: np.ndarray, k: int) -> np.ndarray:
-    """`points` 중에서 중심점 `center`에 가장 가까운 k개의 인덱스를 반환합니다.
+def get_max(df):
+    max_xpos = df['xpos'].max()
+    max_ypos = df['ypos'].max()
+    return max_xpos, max_ypos
 
-    - points: 형상 (M, 2)
-    - center: 형상 (2,)
-    - k: int
+def make_grid(df):
+    max_xpos, max_ypos = get_max(df)
+    grid = [[[] for _ in range(max_xpos//GRID_X+1)] for _ in range(max_ypos//GRID_X+1)]
+    for idx, row in tqdm(df.iterrows(), total=len(df)):
+        xpos = row['xpos']
+        ypos = row['ypos']
+        grid[ypos//GRID_Y][xpos//GRID_X].append(row)
+    return grid
+
+def generate_polyominoes(n):
     """
-    if points.size == 0:
-        return np.array([], dtype=int)
-    k = max(0, min(k, len(points)))
-    if k == 0:
-        return np.array([], dtype=int)
-    # 안전한 계산을 위해 float로 변환하여 제곱 거리 계산
-    diff = points.astype(float) - center.astype(float)
-    d2 = np.sum(diff * diff, axis=1)
-    # 최근접 k개를 argpartition으로 선택
-    idx = np.argpartition(d2, kth=k - 1)[:k]
-    # 선택된 인덱스를 실제 거리 순으로 정렬
-    idx = idx[np.argsort(d2[idx])]
-    return idx
-
-
-def move_ptrs_until_converged(ptrs: np.ndarray, data: np.ndarray, k: int, eps: float, max_iters: int) -> np.ndarray:
-    """외부 반복마다 데이터 사본으로부터 최근접 K개를 사용하여 포인터들을 이동시키고, 수렴할 때까지 반복합니다.
-
-    각 외부 반복에서 수행:
-      - new_data = data의 복사본
-      - 각 포인터에 대해 순서대로:
-          * new_data에서 최근접 K개 선택
-          * 해당 포인트들의 (가중=1) 평균 위치로 이동(정수 반올림)
-          * 선택된 K개는 new_data에서 제거
-    포인터들의 최대 이동량이 eps보다 작아지거나 max_iters에 도달하면 중단합니다.
+    n개의 연결된 블록(폴리오미노) 모양을 모두 생성 (중복 회전/대칭 제외)
+    각 모양은 (0,0) 기준 상대좌표 집합으로 표현
     """
-    ptrs = ptrs.copy()
+    from collections import deque
+    def normalize(cells):
+        # 좌상단 기준 정렬
+        min_x = min(x for x, y in cells)
+        min_y = min(y for x, y in cells)
+        return tuple(sorted((x - min_x, y - min_y) for x, y in cells))
 
-    outer_bar = tqdm(range(max_iters), desc="Outer iters", unit="iter")
-    for _ in outer_bar:
-        old_ptrs = ptrs.copy()
-        new_data = data.copy()
+    def rotations_and_reflections(cells):
+        # 90도 회전, 대칭 포함 모든 변형
+        result = set()
+        for k in range(4):
+            rotated = [(x, y) for x, y in cells]
+            for _ in range(k):
+                rotated = [(-y, x) for x, y in rotated]
+            for reflect in [False, True]:
+                if reflect:
+                    reflected = [(-x, y) for x, y in rotated]
+                else:
+                    reflected = rotated
+                result.add(normalize(reflected))
+        return result
 
-        for i in range(len(ptrs)):
-            if len(new_data) == 0:
-                break
-            k_i = min(k, len(new_data))
-            idx = select_k_nearest(new_data, ptrs[i], k_i)
-            if len(idx) == 0:
-                continue
-            chosen = new_data[idx]
-            # 가중치가 모두 1인 평균을 계산하고 정수로 반올림하여 좌표를 이동
-            mean_pos = np.rint(chosen.astype(float).mean(axis=0)).astype(int)
-            ptrs[i] = mean_pos
-            # 방금 사용한 K개는 new_data에서 제거
-            keep_mask = np.ones(len(new_data), dtype=bool)
-            keep_mask[idx] = False
-            new_data = new_data[keep_mask]
+    seen = set()
+    queue = deque()
+    queue.append(((0, 0),))
+    results = set()
+    while queue:
+        cells = queue.popleft()
+        if len(cells) == n:
+            norm = normalize(cells)
+            if norm not in seen:
+                seen.update(rotations_and_reflections(cells))
+                results.add(norm)
+            continue
+        for x, y in cells:
+            for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+                nx, ny = x+dx, y+dy
+                if (nx, ny) not in cells:
+                    new_cells = tuple(sorted(cells + ((nx, ny),)))
+                    norm = normalize(new_cells)
+                    if norm not in seen:
+                        queue.append(new_cells)
+    return reversed(list(results))
 
-        # 이번 반복에서의 포인터 최대 이동량을 계산하여 수렴 여부 확인
-        max_shift = np.max(np.linalg.norm(ptrs.astype(float) - old_ptrs.astype(float), axis=1)) if len(ptrs) else 0.0
-        outer_bar.set_postfix(max_shift=f"{max_shift:.3g}")
-        if max_shift < eps:
-            break
+# 폴리오미노 모양 미리 생성 (1~MAX_NODE_SIZE)
+POLYOMINOES = {n: generate_polyominoes(n) for n in range(1, MAX_NODE_SIZE+1)}
 
-    outer_bar.close()
-    return ptrs
-
-
-def assign_points_to_ptrs(ptrs: np.ndarray, data: np.ndarray, radius: float):
-    """각 데이터 포인트를 가장 가까운 포인터에 반경 `radius` 이내인 경우에만 할당합니다.
-
-    반환값:
-      - assignments: 각 포인터에 할당된 데이터 인덱스 리스트의 리스트
-      - distances_per_ptr: 포인터별로 각 할당 데이터까지의 거리 배열 리스트
+def plot_complete_nodes(node_map, complete_node):
     """
-    M = len(data)
-    P = len(ptrs)
-    assignments = [[] for _ in range(P)]
-    distances_per_ptr = [list() for _ in range(P)]
-
-    if P == 0 or M == 0:
-        return assignments, [np.array(d) for d in distances_per_ptr]
-
-    for j in tqdm(range(M), desc="Assign points", unit="pt"):
-        p = data[j]
-        # 정의한 distance() 함수를 사용하여 모든 포인터와의 거리를 계산
-        dists = np.array([distance(ptrs[i], p) for i in range(P)], dtype=float)
-        i_min = int(np.argmin(dists))
-        d_min = float(dists[i_min])
-        if d_min <= radius:
-            assignments[i_min].append(j)
-            distances_per_ptr[i_min].append(d_min)
-
-    distances_per_ptr = [np.array(d, dtype=float) if len(d) else np.array([], dtype=float) for d in distances_per_ptr]
-    return assignments, distances_per_ptr
-
-
-def five_number_summary(values: np.ndarray):
-    """1차원 배열에 대한 다섯 수 요약을 (최솟값, 1사분위수, 중앙값, 3사분위수, 최댓값) 순서로 반환합니다.
-    값이 비어 있으면 NaN을 반환합니다.
+    complete_node의 각 노드를 색 다르게, 각 블록에 인덱스(노드 번호) 표시
     """
-    if values.size == 0:
-        return (np.nan, np.nan, np.nan, np.nan, np.nan)
-    quantiles = np.percentile(values, [0, 25, 50, 75, 100])
-    return tuple(float(x) for x in quantiles)
+    h, w = node_map.shape
+    # 노드별 색상 배열 생성
+    cmap = plt.get_cmap('tab20')
+    color_map = np.ones((h, w, 3), dtype=float)
+    index_map = np.full((h, w), -1, dtype=int)
+    for idx, node in enumerate(complete_node):
+        color = cmap(idx % 20)[:3]  # RGB
+        for y, x in node:
+            color_map[y, x] = color
+            index_map[y, x] = idx
+    fig, ax = plt.subplots(figsize=(w/2, h/2), facecolor = 'white')
+    ax.imshow(color_map, interpolation='none', origin='upper')
+    # 인덱스 텍스트 표시
+    for y in range(h):
+        for x in range(w):
+            if index_map[y, x] >= 0:
+                ax.text(x, y, str(index_map[y, x]), va='center', ha='center', fontsize=6, color='black', weight='bold')
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.set_title('Complete Nodes Visualization')
+    plt.tight_layout()
+    plt.savefig(Path('../imgs/complete_nodes.png'))
+    plt.show()
+    plt.close()
 
-
-def merge_close_ptrs(ptrs: np.ndarray, min_dist: float) -> np.ndarray:
+def node_center(node, grid):
     """
-    ptrs 배열에서 min_dist 미만으로 가까운 포인터 쌍을 평균점으로 합칩니다.
-    더 이상 가까운 쌍이 없을 때까지 반복합니다.
+    node: ((y1,x1), (y2,x2), ...)
+    grid: 2차원 리스트, 각 칸에 row 객체 리스트
+    -> 해당 노드의 모든 row의 평균 xpos, ypos 반환
     """
-    while True:
-        n = len(ptrs)
-        if n < 2:
-            break
-        # 모든 쌍의 거리 계산
-        dists = np.linalg.norm(ptrs[:, None, :].astype(float) - ptrs[None, :, :].astype(float), axis=2)
-        np.fill_diagonal(dists, np.inf)  # 자기 자신 제외
-        i, j = np.unravel_index(np.argmin(dists), dists.shape)
-        if dists[i, j] >= min_dist:
-            break
-        # 평균점 계산
-        mean_point = np.rint((ptrs[i].astype(float) + ptrs[j].astype(float)) / 2).astype(int)
-        # 두 포인터 제거, 평균점 추가
-        mask = np.ones(n, dtype=bool)
-        mask[[i, j]] = False
-        ptrs = np.vstack([ptrs[mask], mean_point])
-    return ptrs
+    xpos_list = []
+    ypos_list = []
+    for y, x in node:
+        for row in grid[y][x]:
+            xpos_list.append(row['xpos'])
+            ypos_list.append(row['ypos'])
+    if xpos_list:
+        return (np.mean(xpos_list), np.mean(ypos_list))
+    else:
+        return (0, 0)
 
+def distance(c1, c2):
+    return np.sqrt((c1[0]-c2[0])**2 + (c1[1]-c2[1])**2)
 
 if __name__ == "__main__":
-    # 데이터 로드 (xpos, ypos만 사용)
     csv_path = Path('../data') / 'essential_columns.csv'
     df = pd.read_csv(csv_path, encoding='cp949')
-    if not {'xpos', 'ypos'}.issubset(df.columns):
-        raise ValueError("CSV에는 'xpos'와 'ypos' 컬럼이 포함되어 있어야 합니다.")
+    df['call_date'] = pd.to_datetime(df['call_date'], format='%Y-%m-%d %H')
+    max_xpos, max_ypos = get_max(df)
+    print(f"Max xpos: {max_xpos}, Max ypos: {max_ypos}")
 
-    # 정수 좌표로 numpy 배열 구성
-    points = df[['xpos', 'ypos']].to_numpy(dtype=np.int64)
+    grid = make_grid(df)
 
-    # 데이터의 경계값
-    maxX = int(df['xpos'].max())
-    maxY = int(df['ypos'].max())
-    minX = int(df['xpos'].min())
-    minY = int(df['ypos'].min())
-    print(f"Max X: {maxX}, Max Y: {maxY}")
+    grid_x_size = len(grid[0])
+    grid_y_size = len(grid)
+    print(f"Grid size: {grid_x_size} x {grid_y_size}")
 
-    # 경계 내에서 정수 좌표로 포인터 초기화
-    rng = np.random.default_rng(SEED)
-    xs = rng.integers(minX, maxX + 1, size=N, endpoint=False)
-    ys = rng.integers(minY, maxY + 1, size=N, endpoint=False)
-    ptrs = np.column_stack([xs, ys]).astype(np.int64)
+    ground = np.zeros((grid_y_size, grid_x_size), dtype=int)
+    for i in range(grid_y_size):
+        for j in range(grid_x_size):
+            ground[i][j] = len(grid[i][j])
 
-    # 수렴할 때까지 포인터 이동 반복
-    ptrs = move_ptrs_until_converged(ptrs, points, K, EPSILON, MAX_ITERS)
+    complete_node = []
+    for block_count in range(1, MAX_NODE_SIZE+1):
+        polyominoes = POLYOMINOES[block_count]
+        for shape in polyominoes:
+            # shape: ((0,0),(0,1),...) 상대좌표
+            for i in range(grid_y_size):
+                for j in range(grid_x_size):
+                    coords = []
+                    valid = True
+                    for dx, dy in shape:
+                        x, y = j+dx, i+dy
+                        if 0 <= x < grid_x_size and 0 <= y < grid_y_size:
+                            coords.append((y, x))
+                        else:
+                            valid = False
+                            break
+                    if not valid:
+                        continue
+                    # 음수(-1) 포함 여부 확인
+                    has_negative = any(ground[y][x] < 0 for y, x in coords)
+                    block_sum = sum(ground[y][x] for y, x in coords)
+                    if not has_negative and block_sum >= MIN_DATA_PER_NODE:
+                        for y, x in coords:
+                            ground[y][x] = -1
+                        complete_node.append(tuple(coords))
+    node_sizes = [0]*MAX_NODE_SIZE
+    for node in complete_node:
+        node_sizes[len(node)-1] += 1
+    print(f"Complete nodes: {len(complete_node)}, Sizes: {node_sizes}")
 
-    # MIN_DIST 미만 가까운 포인터 병합
-    ptrs = merge_close_ptrs(ptrs, MIN_DIST)
+    # complete_node를 2차원 배열에 매핑
+    node_map = np.zeros_like(ground)
+    for node in complete_node:
+        for y, x in node:
+            node_map[y][x] = 1
+    # 시각화
+    plot_complete_nodes(node_map, complete_node)
 
-    # 반경 r 이내로 최종 할당 수행
-    assignments, distances_per_ptr = assign_points_to_ptrs(ptrs, points, r)
+    # --- 노드 중심좌표 계산 ---
+    node_centers = [node_center(node, grid) for node in complete_node]
 
-    # 포인터별 할당된 데이터 개수
-    counts = np.array([len(a) for a in assignments], dtype=int)
+    # --- 엣지 생성 ---
+    edges = []
+    n = len(node_centers)
+    for i in range(n):
+        for j in range(i+1, n):
+            dist = distance(node_centers[i], node_centers[j])
+            if dist < MAX_DIST:
+                edges.append((i, j, dist))
+                edges.append((j, i, dist))
 
-    # 포인터별 데이터 개수에 대한 다섯 수 요약
-    five_num = five_number_summary(counts.astype(float))
+    # --- demands 생성 ---
+    minHour = df['call_date'].min()
+    maxHour = df['call_date'].max()
+    total_hours = int((maxHour - minHour).total_seconds() // 3600) + 1
+    demands = np.zeros((total_hours, n), dtype=int)
+    for node_idx, node in enumerate(complete_node):
+        for y, x in node:
+            for row in grid[y][x]:
+                t = int((row['call_date'] - minHour).total_seconds() // 3600)
+                if 0 <= t < total_hours:
+                    demands[t][node_idx] += 1
+    demands_list = demands.tolist()
 
-    # 포인터별 거리 평균/표준편차 계산
-    mean_std_per_ptr = []
-    for dists in distances_per_ptr:
-        if dists.size == 0:
-            mean_std_per_ptr.append((np.nan, np.nan))
-        else:
-            mean_std_per_ptr.append((float(np.mean(dists)), float(np.std(dists, ddof=0))))
-
-    # 결과 출력(요약)
-    print("\n=== Results ===")
-    print(f"Total ptrs: {len(ptrs)}")
-    print(f"Assignment radius r: {r}")
-    print("Assigned counts per ptr (first 20):", counts[:20].tolist())
-    print("Five-number summary of assigned counts across ptrs:")
-    print(f"min={five_num[0]:.3f}, Q1={five_num[1]:.3f}, median={five_num[2]:.3f}, Q3={five_num[3]:.3f}, max={five_num[4]:.3f}")
-
-    # 포인터별 거리 통계 미리보기(최대 20개)
-    preview = [
-        {
-            'ptr_index': i,
-            'mean_dist': (None if np.isnan(ms[0]) else round(ms[0], 6)),
-            'std_dist': (None if np.isnan(ms[1]) else round(ms[1], 6)),
-            'count': int(counts[i])
-        }
-        for i, ms in enumerate(mean_std_per_ptr[:20])
-    ]
-    print("Mean/Std of distances per ptr (preview up to 20):")
-    print(preview)
-
-    # 포인터 좌표 및 할당 개수 저장(선택)
-    out_df = pd.DataFrame({
-        'ptr_x': ptrs[:, 0],
-        'ptr_y': ptrs[:, 1],
-        'assigned_count': counts
-    })
-    out_path = Path('../data') / 'ptrs_summary.csv'
-    try:
-        out_df.to_csv(out_path, index=False, encoding='utf-8')
-        print(f"Saved ptrs summary to {out_path.resolve()}")
-    except Exception as e:
-        print(f"Warning: failed to save ptrs summary: {e}")
+    # --- OutJson 생성 및 저장 ---
+    outjson = OutJson(
+        minHour=minHour,
+        maxHour=maxHour,
+        total_nodes=n,
+        edges=edges,
+        demands=demands_list
+    )
+    outjson.save_json(Path('../data/output.json'))
