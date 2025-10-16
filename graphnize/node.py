@@ -4,10 +4,10 @@ import pandas as pd
 from pathlib import Path
 import numpy as np
 from tqdm import tqdm
-from visualize.grid2hitmap import plot_grid_hitmap
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from outjson import OutJson
+from visualize.grid2hitmap import gridhitmap
 
 #격자 크기
 GRID_X = 1000
@@ -143,6 +143,9 @@ if __name__ == "__main__":
 
     grid = make_grid(df)
 
+    # gridhitmap(grid, logscale=True, title="Grid Hitmap(log)", save_path=Path('../imgs/grid_hitmap.png'))
+    # gridhitmap(grid, logscale=False, title="Grid Hitmap(linear)", save_path=Path('../imgs/grid_hitmap_linear.png'))
+
     grid_x_size = len(grid[0])
     grid_y_size = len(grid)
     print(f"Grid size: {grid_x_size} x {grid_y_size}")
@@ -198,7 +201,7 @@ if __name__ == "__main__":
     n = len(node_centers)
     for i in range(n):
         for j in range(i+1, n):
-            dist = distance(node_centers[i], node_centers[j])
+            dist = 1 - distance(node_centers[i], node_centers[j])/MAX_DIST
             if dist < MAX_DIST:
                 edges.append((i, j, dist))
                 edges.append((j, i, dist))
@@ -224,4 +227,4 @@ if __name__ == "__main__":
         edges=edges,
         demands=demands_list
     )
-    outjson.save_json(Path('../data/output.json'))
+    outjson.save_json(Path('../data/gwn_data.json'))
