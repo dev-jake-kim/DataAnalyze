@@ -234,7 +234,8 @@ def plot_kmeans_partitions(X: np.ndarray, labels: np.ndarray, centroids: np.ndar
         plt.scatter(centroids[:, 0], centroids[:, 1], c='black', s=40, marker='x', linewidths=1.5)
         for i, (cx, cy) in enumerate(centroids):
             label_val = int(counts[i]) // 100
-            plt.text(cx, cy, f"{label_val}", fontsize=7, ha='center', va='bottom', color='black')
+            plt.text(cx, cy, f"id:{i}\n{label_val}", fontsize=7, ha='center', va='bottom', color='black',
+                     bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=1))
         plt.title('K-means Partitions (sampled)' + (f" [{Xp.shape[0]:,}/{Xv.shape[0]:,}]" if Xp.shape[0] != Xv.shape[0] else ""))
         plt.xlabel('xpos')
         plt.ylabel('ypos')
