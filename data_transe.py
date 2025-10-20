@@ -4,6 +4,7 @@ from collections import deque
 import datetime
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
+from tqdm import tqdm
 
 #이 파일은 버릴 데이터를 고르는 용도입니다.
 
@@ -23,22 +24,26 @@ def print_head():
 
 def proceed_first():
     # xpos, ypos가 각각 us_range_x, us_range_y 범위 내에 있는 행만 필터링
-    filtered_df = df[
-        (df['xpos'] >= us_range_x[0]) &
-        (df['xpos'] <= us_range_x[1]) &
-        (df['ypos'] >= us_range_y[1]) &
-        (df['ypos'] <= us_range_y[0])
-    ]
-    # proceed.csv로 저장
-    filtered_df.to_csv('data/proceed.csv', index=False, encoding='cp949')
-    global csv_path
-    csv_path = Path('data') / 'proceed.csv'
+    with tqdm(total=3, desc='proceed_first', unit='step') as pbar:
+        filtered_df = df[
+            (df['xpos'] >= us_range_x[0]) &
+            (df['xpos'] <= us_range_x[1]) &
+            (df['ypos'] >= us_range_y[1]) &
+            (df['ypos'] <= us_range_y[0])
+        ]
+        pbar.update(1)
+        # proceed.csv로 저장
+        filtered_df.to_csv('data/proceed.csv', index=False, encoding='cp949')
+        pbar.update(1)
+        global csv_path
+        csv_path = Path('data') / 'proceed.csv'
+        pbar.update(1)
 
 def eleminate_duplicates():
     #동일 client_id가 10분 이내에 여러번 등장하는 경우 하나만 남기고 제거
     eleminate_idx = []
     queue = deque([])
-    for idx, row in df.iterrows():
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc='eleminate_duplicates', unit='row'):
         client_id = row['clientid']
         timestamp = datetime.datetime.strptime(row['call_date'], '%Y-%m-%d %H:%M:%S.%f')
         while queue and (timestamp - queue[0][1]).total_seconds() > 600:
@@ -51,7 +56,6 @@ def eleminate_duplicates():
     df_dedup = df.drop(index=eleminate_idx)
     df_dedup.to_csv('deduplicated_proceed.csv', index=False, encoding='cp949')
     print(eleminate_idx)
-    # print(f"Removed {len(eleminate_idx)} duplicate entries.")
     global csv_path
     csv_path = Path('data') / 'deduplicated_proceed.csv'
 
@@ -60,15 +64,18 @@ def get_min_max():
     print(df['ypos'].min(), df['ypos'].max())
 
 def visualize_data(point_x=None, point_y=None, s=3):
-    plt.figure(figsize=(30, 30))
-    plt.scatter(df['xpos'], df['ypos'], alpha=0.5, s=s)
-    if point_x and point_y:
-        plt.scatter(point_x, point_y, c='blue', s=100, marker='o', label='Middle Point')
-    plt.xlabel('X Position')
-    plt.ylabel('Y Position')
-    plt.title('Scatter Plot of X and Y Positions')
-    plt.grid(True)
-    plt.show()
+    with tqdm(total=2, desc='visualize_data', unit='step') as pbar:
+        plt.figure(figsize=(30, 30))
+        plt.scatter(df['xpos'], df['ypos'], alpha=0.5, s=s)
+        pbar.update(1)
+        if point_x and point_y:
+            plt.scatter(point_x, point_y, c='blue', s=100, marker='o', label='Middle Point')
+        plt.xlabel('X Position')
+        plt.ylabel('Y Position')
+        plt.title('Scatter Plot of X and Y Positions')
+        plt.grid(True)
+        plt.show()
+        pbar.update(1)
 
 
 def k_mean_analize():
@@ -79,7 +86,7 @@ def k_mean_analize():
     # 군집화에 사용할 데이터 (xpos, ypos)
     features = df[['xpos', 'ypos']]
 
-    for k in range(3, 9):
+    for k in tqdm(range(3, 9), desc='K-Means(k)', unit='k'):
         # KMeans 모델 생성 및 학습
         kmeans = KMeans(n_clusters=k, random_state=42, n_init='auto')
         labels = kmeans.fit_predict(features)
@@ -112,7 +119,7 @@ def middle_point():
     return xpos_median, ypos_median
 
 def del_outliers(x_mean, y_mean, datas, rate=0.005):
-    for data in datas:
+    for data in tqdm(datas, desc='del_outliers', unit='pt'):
         dx, dy = abs(data[0] - x_mean), abs(data[1] - y_mean)
         distance = max(dx, dy)
         data[2]  = distance
@@ -123,23 +130,25 @@ def del_outliers(x_mean, y_mean, datas, rate=0.005):
 
 def refine_middle_point(datas):
     x_sum, y_sum = 0, 0
-    for data in datas:
+    for data in tqdm(datas, desc='refine_middle_point', unit='pt', leave=False):
         x_sum += data[0]
         y_sum += data[1]
     return x_sum // len(datas), y_sum // len(datas)
 
 def crop(threshold_rate = 0.85):
     datas = []
-    for idx, row in df.iterrows():
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc='build_datas', unit='row'):
         datas.append([row['xpos'], row['ypos'], 0, idx])
     cnt = 0
     threshold = int(len(datas) * threshold_rate)
     print(f"Initial Data Count: {len(datas)}, Threshold: {threshold}")
-    while len(datas) > threshold:
-        cnt += 1
-        x_mid, y_mid = refine_middle_point(datas)
-        print(f"{cnt}: Current Middle Point: {x_mid}, {y_mid}, Data Count: {len(datas)}")
-        del_outliers(x_mid, y_mid, datas, rate=0.001)
+    with tqdm(desc='crop_iter', unit='iter') as pbar:
+        while len(datas) > threshold:
+            cnt += 1
+            x_mid, y_mid = refine_middle_point(datas)
+            print(f"{cnt}: Current Middle Point: {x_mid}, {y_mid}, Data Count: {len(datas)}")
+            del_outliers(x_mid, y_mid, datas, rate=0.001)
+            pbar.update(1)
 
     #남아있는 data만 저장
     remaining_indices = [data[3] for data in datas]
@@ -149,18 +158,25 @@ def crop(threshold_rate = 0.85):
     return refine_middle_point(datas)
 
 def change_time_format():
-    #'%Y-%m-%d %H:%M:%S.%f' -> '%Y-%m-%d %H
-    df['call_date'] = pd.to_datetime(df['call_date'], format='%Y-%m-%d %H:%M:%S.%f')
-    df['call_date'] = df['call_date'].dt.strftime('%Y-%m-%d %H')
+    #'%Y-%m-%d %H:%M:%S.%f' -> '%Y-%m-%d %H'
+    with tqdm(total=2, desc='change_time_format', unit='step') as pbar:
+        df['call_date'] = pd.to_datetime(df['call_date'], format='%Y-%m-%d %H:%M:%S.%f')
+        pbar.update(1)
+        df['call_date'] = df['call_date'].dt.strftime('%Y-%m-%d %H')
+        pbar.update(1)
     df.to_csv('data/changed_time_format.csv', index=False, encoding='cp949')
 
 def drop_nonessential_columns():
     essential_columns = ['clientid', 'call_date', 'xpos', 'ypos']
-    df_filtered = df[essential_columns]
-    minX= df['xpos'].min()
-    minY= df['ypos'].min()
-    df_filtered['xpos'] = df_filtered['xpos'].apply(lambda x: x - minX)
-    df_filtered['ypos'] = df_filtered['ypos'].apply(lambda y: y - minY)
+    with tqdm(total=3, desc='drop_nonessential_columns', unit='step') as pbar:
+        df_filtered = df[essential_columns].copy()
+        pbar.update(1)
+        minX= df['xpos'].min()
+        minY= df['ypos'].min()
+        pbar.update(1)
+        df_filtered['xpos'] = df_filtered['xpos'].apply(lambda x: x - minX)
+        df_filtered['ypos'] = df_filtered['ypos'].apply(lambda y: y - minY)
+        pbar.update(1)
 
     df_filtered.to_csv('data/essential_columns.csv', index=False, encoding='cp949')
 

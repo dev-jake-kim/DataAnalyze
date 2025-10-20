@@ -12,7 +12,7 @@ from outjson import OutJson
 # 하이퍼파라미터
 K = 200           # 초기 클러스터 개수
 R = 5000          # 클러스터 중심으로부터 허용 반경 (이상은 제거)
-POW = 200         # 클러스터 최소 데이터 수 (이하 클러스터 제거)
+POW = 183*2        # 클러스터 최소 데이터 수 (이하 클러스터 제거)
 MAX_NODE_DIST = 8000  # 노드 간 연결 최대 거리(이상은 미연결)
 MAX_ITER = 100    # K-means 반복 횟수
 SEED = 42         # 재현성
@@ -231,10 +231,10 @@ def plot_kmeans_partitions(X: np.ndarray, labels: np.ndarray, centroids: np.ndar
             if np.any(m):
                 plt.scatter(Xp[m, 0], Xp[m, 1], s=3, alpha=0.5, color=cmap(c % 20))
         # 중심 표시 및 카운트 라벨
-        plt.scatter(centroids[:, 0], centroids[:, 1], c='black', s=40, marker='x', linewidths=1.5)
+        # plt.scatter(centroids[:, 0], centroids[:, 1], c='black', s=40, marker='x', linewidths=1.5)
         for i, (cx, cy) in enumerate(centroids):
-            label_val = int(counts[i]) // 100
-            plt.text(cx, cy, f"id:{i}\n{label_val}", fontsize=7, ha='center', va='bottom', color='black',
+            label_val = format(int(counts[i]) / 183, '.1f')
+            plt.text(cx, cy, f"{label_val}", fontsize=7, ha='center', va='bottom', color='black',
                      bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=1))
         plt.title('K-means Partitions (sampled)' + (f" [{Xp.shape[0]:,}/{Xv.shape[0]:,}]" if Xp.shape[0] != Xv.shape[0] else ""))
         plt.xlabel('xpos')
@@ -326,6 +326,9 @@ if __name__ == "__main__":
 
     # 9) 수요 행렬 구성
     minHour, maxHour, demands = build_demands(df, compressed_labels, num_nodes)
+    sum_demands = sum(sum(row) for row in demands)
+    print(f'Sum of demands: {sum_demands}')
+    print(f'dropped points: {n - sum_demands} / {n} ({(n - sum_demands) / n:.2%})')
 
     # 10) OutJson 저장
     outjson = OutJson(

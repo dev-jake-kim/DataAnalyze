@@ -43,6 +43,7 @@ print(avg_calls_per_day)
 
 
 plt.figure(figsize=(10, 6))
+plt.ylim(bottom=1000, top=2500)
 plt.bar(english_weekdays, avg_calls_per_day, color='skyblue')
 plt.title('Average Number of Calls per Day of the Week')
 plt.xlabel('Day of the Week')
