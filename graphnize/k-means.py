@@ -16,6 +16,7 @@ POW = 183*2        # 클러스터 최소 데이터 수 (이하 클러스터 제�
 MAX_NODE_DIST = 8000  # 노드 간 연결 최대 거리(이상은 미연결)
 MAX_ITER = 100    # K-means 반복 횟수
 SEED = 42         # 재현성
+NUM_OF_DAYS = 182
 
 
 def _init_centroids_kpp(X: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
@@ -197,7 +198,15 @@ def build_demands(df: pd.DataFrame, labels: np.ndarray, num_nodes: int) -> Tuple
     return minHour, maxHour, demands.tolist()
 
 
-def plot_kmeans_partitions(X: np.ndarray, labels: np.ndarray, centroids: np.ndarray, counts: np.ndarray, save_dir: Path, sample_cap: int = 200_000) -> None:
+def plot_kmeans_partitions(
+        X: np.ndarray,
+        labels: np.ndarray,
+        centroids: np.ndarray,
+        counts: np.ndarray,
+        save_dir: Path,
+        demands: np.ndarray,
+        text_type: int,
+        sample_cap: int = 200_000) -> None:
     """
     K-means 결과 시각화
     - 산점도: 포인트를 클러스터 색으로 표시 + 중심과 해당 클러스터 데이터 수 라벨링
@@ -232,16 +241,43 @@ def plot_kmeans_partitions(X: np.ndarray, labels: np.ndarray, centroids: np.ndar
                 plt.scatter(Xp[m, 0], Xp[m, 1], s=3, alpha=0.5, color=cmap(c % 20))
         # 중심 표시 및 카운트 라벨
         # plt.scatter(centroids[:, 0], centroids[:, 1], c='black', s=40, marker='x', linewidths=1.5)
+        total = 0
         for i, (cx, cy) in enumerate(centroids):
-            label_val = format(int(counts[i]) / 183, '.1f')
-            plt.text(cx, cy, f"{label_val}", fontsize=7, ha='center', va='bottom', color='black',
-                     bbox=dict(facecolor='white', alpha=0.6, edgecolor='none', pad=1))
-        plt.title('K-means Partitions (sampled)' + (f" [{Xp.shape[0]:,}/{Xv.shape[0]:,}]" if Xp.shape[0] != Xv.shape[0] else ""))
+            demand = demands[i]
+            if text_type == 1:
+                reshaped_demand = demand.reshape(-1, 24)
+                reshaped_demand = reshaped_demand[:, 6:21]  # 8시 ~ 19시 12시간
+                label_val = format(int(reshaped_demand.sum()) / (NUM_OF_DAYS * 16), '.1f')
+                text = f"{label_val}"
+                title = 'K-means Partitions (demands per hour (06:00~21:00))'
+            elif text_type == 2:
+                reshaped_demand = demand.reshape(-1, 24)
+                text = f"{max(reshaped_demand[:, 9])}"
+                title = 'K-means Partitions (max demands of 09:00)'
+            elif text_type == 3:
+                text = f'{np.percentile(demand, 70)}'
+                title = 'K-means Partitions (median demands)'
+            elif text_type == 4:
+                demand_sorted = sorted(demand)
+                bottom_50_percent_values = demand_sorted[:int(len(demand_sorted)*0.7)]
+                _sum = sum(bottom_50_percent_values)
+                text = f'{_sum}'
+                total+=_sum
+                title = 'K-means Partitions (Bottom 50%)'
+            else:
+                reshaped_demand = demand.reshape(-1, 24)
+                text = f'{min(reshaped_demand[:, 17])}'
+                title = 'K-means Partitions (min demands)'
+            plt.text(cx, cy, text, fontsize=12, ha='center', va='bottom', color='black', fontweight='bold',
+                     bbox=dict(facecolor='white', alpha=0, edgecolor='none', pad=1))
+        plt.title(title)
         plt.xlabel('xpos')
         plt.ylabel('ypos')
         plt.tight_layout()
-        plt.savefig(save_dir / 'kmeans_partitions.png', dpi=200)
+        plt.savefig(save_dir / f'kmeans_partitions{text_type}.png', dpi=600)
         plt.close()
+        if text_type ==4:
+            print(f"Total bottom 70% demands: {total}")
 
     # 막대그래프(클러스터별 데이터 수)
     if counts.size > 0:
@@ -252,8 +288,22 @@ def plot_kmeans_partitions(X: np.ndarray, labels: np.ndarray, centroids: np.ndar
         plt.ylabel('#Points')
         plt.title('Points per Cluster')
         plt.tight_layout()
-        plt.savefig(save_dir / 'cluster_counts.png', dpi=200)
+        plt.savefig(save_dir / 'cluster_counts.png', dpi=600)
         plt.close()
+
+def plot_demnands_histogram(demand_T: np.ndarray, save_dir: Path):
+    # 값별 개수 집계
+    values, counts = np.unique(demand_T, return_counts=True)
+    plt.figure(figsize=(12, 6), facecolor='white')
+    plt.bar(values, counts, color='orange')
+    plt.yscale('log')
+    plt.xlabel('Demand Value')
+    plt.ylabel('Count (log scale)')
+    plt.title('Demand Value Histogram (log scale)')
+    plt.tight_layout()
+    save_dir.mkdir(parents=True, exist_ok=True)
+    plt.savefig(save_dir / 'demand_histogram.png', dpi=600)
+    plt.close()
 
 
 if __name__ == "__main__":
@@ -340,11 +390,17 @@ if __name__ == "__main__":
     )
     outjson.save_json(data_dir / 'gwn_data.json')
 
-    # 11) 시각화 저장
-    if num_nodes > 0:
-        # 클러스터별 포인트 수 계산
-        counts = np.bincount(compressed_labels[compressed_labels != -1], minlength=num_nodes)
-        plot_kmeans_partitions(X, compressed_labels, final_centroids, counts, img_dir)
+    # # 11) 시각화 저장
+    # if num_nodes > 0:
+    #     # 클러스터별 포인트 수 계산
+    #     counts = np.bincount(compressed_labels[compressed_labels != -1], minlength=num_nodes)
+    #     demand_T = np.array(demands).T  # (num_nodes, total_hours)
+    #     for i in range(0, 5):
+    #         plot_kmeans_partitions(X, compressed_labels, final_centroids, counts, img_dir, demand_T, text_type=i)
+    #     demand_T = demand_T.reshape(-1)
+    #     path = img_dir / 'demands_histogram.png'
+    #     plot_demnands_histogram (demand_T, path)
+
 
     # 간단 로그
     print(f"Total rows: {n}")
