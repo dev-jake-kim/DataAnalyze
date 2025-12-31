@@ -8,8 +8,8 @@ from tqdm import tqdm
 from typing import Optional
 import matplotlib.pyplot as plt
 
-US_RANGE_X = (128950739, 129500739)
-US_RANGE_Y = (35756099, 35305729)
+US_RANGE_X = (128_950739, 129500739) #550,000 ->1000 = 100m
+US_RANGE_Y = (35_756099, 35305729) # 450,370 -> 1000 = 100m
 
 
 # ---------- I/O ----------
@@ -143,7 +143,7 @@ def eleminate_duplicates(df: pd.DataFrame,
     return df.drop(index=out_idx_to_drop)
 
 
-def crop_filter(df: pd.DataFrame, threshold_rate: float = 0.85, step_rate: float = 0.001) -> pd.DataFrame:
+def crop_filter(df: pd.DataFrame, threshold_rate: float = 0.95, step_rate: float = 0.001) -> pd.DataFrame:
     """
     중심점에서 멀리 있는 점들을 반복적으로 제거하여 데이터 수를 threshold_rate 비율까지 줄입니다.
     - 입력: df(xpos, ypos 필수)
@@ -254,8 +254,8 @@ if __name__ == '__main__':
         remove_other_region,
         drop_nonessential_columns,
         eleminate_duplicates,
-        # crop_filter,
-        # visualize_scatter_filter,
+        crop_filter,
+        visualize_scatter_filter,
         change_time_format,
     ]
 

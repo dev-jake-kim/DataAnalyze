@@ -6,20 +6,21 @@ from tqdm import tqdm  # 진행률 표시
 import matplotlib
 matplotlib.use("Agg")  # 서버/헤드리스 환경에서도 저장 가능
 import matplotlib.pyplot as plt
+# from tslearn.metrics import cdist_dtw
+from numba import njit, prange
 
 from outjson import OutJson
 
 # 하이퍼파라미터
-K = 200           # 초기 클러스터 개수
-R = 2500          # 클러스터 중심으로부터 허용 반경 (이상은 제거)
-POW = 183*2        # 클러스터 최소 데이터 수 (이하 클러스터 제거)
-MAX_NODE_DIST = 8000  # 노드 간 연결 최대 거리(이상은 미연결)
+K = 150       # 초기 클러스터 개수
+R = 5000          # 클러스터 중심으로부터 허용 반경 (이상은 제거)
+POW = 183*10        # 클러스터 최소 데이터 수 (이하 클러스터 제거)
+MAX_NODE_DIST = 10000  # 노드 간 연결 최대 거리(이상은 미연결)
 MAX_ITER = 100    # K-means 반복 횟수
-SEED = 42         # 재현성
+SEED = 13         # 재현성
 NUM_OF_DAYS = 182
 
-TRUST_RANGE = 3.03
-CONNECTION_THRESHOLD = 0.1
+CONNECTION_THRESHOLD = 10
 
 
 def _init_centroids_kpp(X: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
@@ -40,7 +41,9 @@ def _init_centroids_kpp(X: np.ndarray, k: int, rng: np.random.Generator) -> np.n
     return centroids
 
 
-def kmeans_fit(X: np.ndarray, k: int, max_iter: int = MAX_ITER, seed: int = SEED) -> Tuple[np.ndarray, np.ndarray]:
+def kmeans_fit(
+        X: np.ndarray, k: int, max_iter: int = MAX_ITER,
+        seed: int = SEED) -> Tuple[np.ndarray, np.ndarray]:
     """
     간단한 K-means 학습
     - 입력: X (N,2), k
@@ -48,9 +51,8 @@ def kmeans_fit(X: np.ndarray, k: int, max_iter: int = MAX_ITER, seed: int = SEED
     """
     rng = np.random.default_rng(seed)
     n = X.shape[0]
-    k = min(k, n)  # 안전 장치
-    if k <= 0:
-        return np.zeros((0, 2)), np.full(n, -1, dtype=int)
+    if k >= n:
+        raise Exception("k는 n보다 커야함")
 
     # 초기 중심 (k-means++)
     centroids = _init_centroids_kpp(X, k, rng)
@@ -162,78 +164,6 @@ def recompute_centroids(X: np.ndarray, labels: np.ndarray, num_clusters: int) ->
     return C
 
 
-def build_edges(centroids: np.ndarray, max_dist: float) -> List[Tuple[int, int, float]]:
-    """
-    중심 간 거리 < max_dist 인 쌍을 양방향 엣지로 생성. 가중치 w = max(0, 1 - d/max_dist)
-    """
-    m = centroids.shape[0]
-    edges: List[Tuple[int, int, float]] = []
-    if m == 0:
-        return edges
-    for i in tqdm(range(m), desc="Build edges", unit="node"):
-        for j in range(i + 1, m):
-            d = float(np.linalg.norm(centroids[i] - centroids[j]))
-            if d < max_dist:
-                w = max(0.0, 1.0 - d / max_dist)
-                edges.append((i, j, w))
-                edges.append((j, i, w))
-    return edges
-
-
-def build_edges_mahalanobis(node_arrays: List[np.ndarray],
-                            C_arr: List[Tuple[Tuple[float, float], np.ndarray]],
-                            trust_range: float,
-                            conn_threshold: float) -> List[Tuple[int, int, float]]:
-    """
-    Mahalanobis 거리 기반으로 directed edges 생성.
-    - 각 노드 i에 대해 (mean, cov)이 C_arr에 있음.
-    - 노드 A(i)와 노드 B(j)에 대해 B의 데이터 중 A의 분포에서 Mahalanobis 거리 <= trust_range 인 점의 비율이
-      conn_threshold 이상이면 A -> B 엣지를 생성.
-    - 엣지 가중치(weight)는 (조건을 만족하는) 점들의 Mahalanobis 거리 평균으로 설정.
-
-    반환: List of (i, j, weight)
-    """
-    m = len(C_arr)
-    edges: List[Tuple[int, int, float]] = []
-    if m == 0:
-        return edges
-
-    eps = 1e-6
-    for i in range(m):
-        mu_i, cov_i = C_arr[i]
-        mu_i = np.asarray(mu_i, dtype=float)
-        cov_i = np.asarray(cov_i, dtype=float)
-        # 정규화: 빈 또는 영 공분산이면 역행렬 계산 불가 -> 작은 정규화 항 추가
-        try:
-            cov_inv = np.linalg.pinv(cov_i + eps * np.eye(2))
-        except Exception:
-            cov_inv = np.linalg.pinv(np.eye(2) * eps)
-
-        for j in range(m):
-            if i == j:
-                continue
-            pts_B = node_arrays[j]
-            if pts_B is None or pts_B.size == 0:
-                continue
-            # Mahalanobis 거리 계산: sqrt((x-mu)^T cov_inv (x-mu))
-            diffs = pts_B - mu_i
-            # compute squared Mahalanobis distances
-            # use einsum for speed
-            d2 = np.einsum('...i,ij,...j', diffs, cov_inv, diffs)
-            # numerical safety
-            d2 = np.maximum(d2, 0.0)
-            dists = np.sqrt(d2)
-            # 비율 계산
-            in_mask = dists <= trust_range
-            count_in = int(np.count_nonzero(in_mask))
-            total_b = pts_B.shape[0]
-            proportion = count_in / total_b
-            if proportion >= conn_threshold and count_in > 0:
-                weight = float(np.mean(dists[in_mask]))
-                edges.append((i, j, weight))
-    return edges
-
-
 def build_demands(df: pd.DataFrame, labels: np.ndarray, num_nodes: int) -> Tuple[pd.Timestamp, pd.Timestamp, List[List[int]]]:
     """
     각 시간(hour) x 노드별 수요 행렬 생성. 라벨 -1 은 제외.
@@ -254,167 +184,165 @@ def build_demands(df: pd.DataFrame, labels: np.ndarray, num_nodes: int) -> Tuple
 
     return minHour, maxHour, demands.tolist()
 
+# 8) centroid 시각화 함수
+def visualize_clusters(X: np.ndarray, labels: np.ndarray, centroids: np.ndarray, save_path: Path) -> None:
+    """클러스터 결과 시각화 및 저장."""
+    plt.figure(figsize=(10, 10))
+    unique_labels = np.unique(labels)
+    colors = plt.cm.get_cmap('tab20', len(unique_labels))
 
-def plot_kmeans_partitions(
-        X: np.ndarray,
-        labels: np.ndarray,
-        centroids: np.ndarray,
-        counts: np.ndarray,
-        save_dir: Path,
-        edges: List[Tuple[int, int, float]],
-        sample_cap: int = 200_000) -> None:
-    """
-    간단한 K-means 파티션 플롯:
-    - 모든 포인트는 클러스터 색으로 산점도로 그리되 투명도 낮게 표시
-    - 노드 번호(label)는 edges에 연결된 노드만 표시
-    - edges에 있는 연결만 선으로 그림 (directed 표시 안함, 단순 선)
-    - 막대그래프는 그대로 유지
-    """
-    save_dir.mkdir(parents=True, exist_ok=True)
+    for i, lbl in enumerate(unique_labels):
+        cluster_points = X[labels == lbl]
+        plt.scatter(cluster_points[:, 0], cluster_points[:, 1], s=5, color=colors(i), alpha=0.6) #label=f'Cluster {lbl}' if lbl != -1 else 'Removed',
 
-    # 유효 포인트만
-    mask = labels != -1
-    Xv = X[mask]
-    Lv = labels[mask]
+    # 중심점 표시
+    plt.scatter(centroids[:, 0], centroids[:, 1], s=100, color='black', marker='x', label='Centroids')
 
-    # 샘플링
-    n = Xv.shape[0]
-    if n > sample_cap:
-        rng = np.random.default_rng(SEED)
-        idx = rng.choice(n, size=sample_cap, replace=False)
-        Xp = Xv[idx]
-        Lp = Lv[idx]
-    else:
-        Xp, Lp = Xv, Lv
-
-    num_nodes = centroids.shape[0]
-
-    # 연결된 노드 집합 추출
-    connected = set()
-    for (a, b, _) in edges:
-        connected.add(int(a))
-        connected.add(int(b))
-
-    # If no connected nodes found, fall back to showing all nodes (helpful for debugging)
-    show_all_nodes_if_none = False
-    if len(connected) == 0:
-        show_all_nodes_if_none = True
-        # do not modify `connected`, just use flag to show all labels in that case
-
-    # 산점도 + 노드 번호 및 엣지 그리기
-    if num_nodes > 0 and Xp.shape[0] > 0:
-        plt.figure(figsize=(10, 8), facecolor='white')
-        cmap = plt.get_cmap('tab20')
-        # 모든 클러스터 포인트를 희미하게 그림
-        for c in range(num_nodes):
-            m = Lp == c
-            if np.any(m):
-                plt.scatter(Xp[m, 0], Xp[m, 1], s=3, alpha=0.25, color=cmap(c % 20), linewidths=0)
-
-        # 엣지 그리기 (centroid 좌표 사용)
-        for (i, j, w) in edges:
-            if i < 0 or j < 0 or i >= num_nodes or j >= num_nodes:
-                continue
-            p1 = centroids[int(i)]
-            p2 = centroids[int(j)]
-            # 선: 회색, 두께는 가중치에 따라 약간 조절
-            try:
-                lw = max(0.5, 2.0 - float(w) / (max(1.0, float(w)) + 1e-9))
-            except Exception:
-                lw = 1.0
-            plt.plot([p1[0], p2[0]], [p1[1], p2[1]], color='gray', alpha=0.7, linewidth=lw, zorder=1)
-
-        # 모든 centroid는 작은 마커로 먼저 표시(항상 보이도록)
-        if num_nodes > 0:
-            centroids_arr = np.asarray(centroids)
-            plt.scatter(centroids_arr[:, 0], centroids_arr[:, 1], s=20, c='none', edgecolors='black', linewidths=0.8, zorder=2)
-
-        # 연결된 노드만 번호 표시 (없을 경우 모든 노드 표시)
-        for c in range(num_nodes):
-            cx, cy = centroids[c]
-            if show_all_nodes_if_none or (c in connected):
-                # 강조해서 표시
-                plt.scatter([cx], [cy], c='black', s=80, zorder=3)
-                plt.text(cx, cy, str(c), fontsize=10, ha='center', va='center', color='white', fontweight='bold',
-                         bbox=dict(facecolor='black', alpha=0.85, edgecolor='none', pad=1), zorder=4)
-            else:
-                # 비연결 노드는 작은 회색 점으로 표시(라벨 없음)
-                plt.scatter([cx], [cy], c='gray', s=10, zorder=2)
-
-        # If we showed all nodes because none were connected, add a small note
-        if show_all_nodes_if_none:
-            plt.text(0.01, 0.01, 'Note: no edges found => showing all node ids', transform=plt.gca().transAxes,
-                     fontsize=8, color='red', bbox=dict(facecolor='white', alpha=0.6, edgecolor='none'))
-
-        plt.title('K-means Partitions (connected nodes)')
-        plt.xlabel('xpos')
-        plt.ylabel('ypos')
-        plt.tight_layout()
-        plt.savefig(save_dir / f'kmeans_partitions_connected.png', dpi=600)
-        plt.close()
-
-    # 막대그래프(클러스터별 데이터 수)
-    if counts.size > 0:
-        order = np.argsort(-counts)
-        plt.figure(figsize=(12, 5), facecolor='white')
-        plt.bar(np.arange(len(order)), counts[order], color='steelblue')
-        plt.xlabel('Cluster (sorted by size)')
-        plt.ylabel('#Points')
-        plt.title('Points per Cluster')
-        plt.tight_layout()
-        plt.savefig(save_dir / 'cluster_counts.png', dpi=600)
-        plt.close()
-
-def plot_demnands_histogram(demand_T: np.ndarray, save_dir: Path):
-    # 값별 개수 집계
-    values, counts = np.unique(demand_T, return_counts=True)
-    plt.figure(figsize=(12, 6), facecolor='white')
-    plt.bar(values, counts, color='orange')
-    plt.yscale('log')
-    plt.xlabel('Demand Value')
-    plt.ylabel('Count (log scale)')
-    plt.title('Demand Value Histogram (log scale)')
-    plt.tight_layout()
-    save_dir.mkdir(parents=True, exist_ok=True)
-    plt.savefig(save_dir / 'demand_histogram.png', dpi=600)
+    plt.title('K-means Clustering Result')
+    plt.xlabel('X Position')
+    plt.ylabel('Y Position')
+    plt.legend(markerscale=2)
+    plt.grid(True)
+    plt.savefig(save_path)
     plt.close()
 
-def node_arrays_and_covariances(X: np.ndarray, compressed_labels: np.ndarray
-                                ) -> Tuple[List[np.ndarray], List[Tuple[Tuple[float, float], np.ndarray]]]:
+#각 centroid의 point개수 시각화 함수(막대 그래프)
+def visualize_allocation(labels: np.ndarray, num_nodes: int, save_path: Path) -> None:
+    plt.figure(figsize=(30, 10))
+
+    allocation_counts = [np.sum(labels == i) for i in range(num_nodes)]
+    #정렬
+    allocation_counts.sort(reverse=True)
+
+    bars = plt.bar(range(num_nodes), allocation_counts, color='skyblue')
+    plt.bar_label(bars, padding=3)
+    plt.xlabel('Centroid Index')
+    plt.ylabel('Number of Points Allocated')
+    plt.title('Point Allocation per Centroid')
+    plt.grid(axis='y')
+    plt.savefig(save_path)
+    plt.close()
+
+
+@njit(fastmath=True)
+def dtw_distance(s1, s2):
+    """두 시계열 사이의 DTW 거리를 계산 (L2 norm 기반)"""
+    n, m = len(s1), len(s2)
+    # DP 테이블 초기화 (메모리 절약을 위해 현재와 이전 열만 사용할 수도 있지만, 이해를 위해 전체 테이블 사용)
+    dtw_matrix = np.full((n + 1, m + 1), np.inf)
+    dtw_matrix[0, 0] = 0
+
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            cost = (s1[i - 1] - s2[j - 1]) ** 2
+            # 대각선, 위, 왼쪽 중 최소값 선택
+            last_min = min(dtw_matrix[i - 1, j],  # insertion
+                           dtw_matrix[i, j - 1],  # deletion
+                           dtw_matrix[i - 1, j - 1])  # match
+            dtw_matrix[i, j] = cost + last_min
+
+    return np.sqrt(dtw_matrix[n, m])
+
+
+@njit(parallel=True)
+def compute_dtw_matrix(X):
     """
-    반환:
-      - node_arrays: 각 노드 j에 대해 할당된 점들의 np.ndarray (N_j, 2)
-      - C_arr: 각 노드에 대해 ((xmean, ymean), cov_matrix(2x2)) 리스트
-    빈 노드는 빈 배열과 2x2 영행렬을 반환.
+    (nodes, timesteps) 형태의 2차원 배열을 받아
+    (nodes, nodes) 형태의 거리 행렬을 반환
     """
-    # 유효 라벨 존재 확인
-    if compressed_labels.size == 0 or not np.any(compressed_labels != -1):
-        return [], []
+    n_nodes = X.shape[0]
+    dist_matrix = np.zeros((n_nodes, n_nodes))
 
-    num_nodes = int(compressed_labels.max()) + 1
-    node_arrays: List[np.ndarray] = []
-    C_arr: List[Tuple[Tuple[float, float], np.ndarray]] = []
+    # parallel=True와 prange를 사용하여 멀티코어 병렬 처리
+    for i in prange(n_nodes):
+        for j in range(i + 1, n_nodes):
+            d = dtw_distance(X[i], X[j])
+            dist_matrix[i, j] = d
+            dist_matrix[j, i] = d  # 대칭 행렬이므로 복사
 
-    for j in range(num_nodes):
-        pts = X[compressed_labels == j]
-        node_arrays.append(pts)
+    return dist_matrix
 
-        if pts.shape[0] == 0:
-            mean = (0.0, 0.0)
-            cov = np.zeros((2, 2), dtype=float)
-        else:
-            mean_vals = pts.mean(axis=0)
-            mean = (float(mean_vals[0]), float(mean_vals[1]))
-            if pts.shape[0] >= 2:
-                cov = np.cov(pts, rowvar=False)
-                # np.cov의 결과가 (2,2)인지 보장
-                cov = cov.reshape(2, 2)
-            else:
-                cov = np.zeros((2, 2), dtype=float)
+def visualize_dtw(dtw_matrix: np.ndarray, save_path: Path) -> None:
+    """DTW 유사도 행렬 시각화 및 저장."""
+    plt.figure(figsize=(10, 8))
+    plt.imshow(dtw_matrix, cmap='hot', interpolation='nearest')
+    plt.colorbar(label='DTW Distance')
+    plt.title('DTW Similarity Matrix')
+    plt.xlabel('Node Index')
+    plt.ylabel('Node Index')
+    plt.savefig(save_path)
+    plt.close()
 
-        C_arr.append((mean, cov))
+def five_summation(arr):
+    sorted_indices = np.argsort(arr)
+    n = len(arr)
 
-    return node_arrays, C_arr
+    # 2. 5점 요약에 해당하는 순수 인덱스 계산
+    # (0%, 25%, 50%, 75%, 100% 위치의 인덱스 추출)
+    idx_min = sorted_indices[0]
+    idx_q1 = sorted_indices[int(np.percentile(np.arange(n), 25))]
+    idx_q2 = sorted_indices[int(np.percentile(np.arange(n), 50))]
+    idx_q3 = sorted_indices[int(np.percentile(np.arange(n), 75))]
+    idx_max = sorted_indices[-1]
+
+    # 결과 출력
+    summary_labels = ["최솟값(Min)", "제1사분위(Q1)", "중앙값(Q2)", "제3사분위(Q3)", "최댓값(Max)"]
+    indices = [idx_min, idx_q1, idx_q2, idx_q3, idx_max]
+
+    print(f"{'구분':<10} | {'인덱스':<6} | {'값':<5}")
+    print("-" * 25)
+    for label, idx in zip(summary_labels, indices):
+        print(f"{label:<10} | {idx:<8} | {arr[idx]:<5}")
+
+def demand_fft(demands_array: np.ndarray, img_dir: Path):
+    """
+    demands_array: (timestep, batch)
+    img_dir: Path to save fft plots
+    """
+    demands_array = demands_array[:, :1]
+    T, B = demands_array.shape
+    time_step_hours = 1.0  # 1 hour sampling
+
+    # target periods (hours)
+    target_periods = [24, 168]  # daily, weekly
+    target_indices = [int(T / p) for p in target_periods]
+
+    for b in range(B):
+        x = demands_array[:, b]
+
+        # remove mean (important for periodicity analysis)
+        x = x - np.mean(x)
+
+        # FFT
+        fft_vals = np.fft.rfft(x)
+        magnitude = np.abs(fft_vals)
+
+        freqs = np.fft.rfftfreq(T, d=time_step_hours)
+
+        # avoid zero freq
+        magnitude[0] = 0.0
+
+        plt.figure(figsize=(10, 5))
+        plt.plot(freqs, magnitude, label="FFT Magnitude")
+
+        # mark 24h / 168h periodicity
+        for p, k in zip(target_periods, target_indices):
+            if k < len(freqs):
+                plt.axvline(freqs[k], linestyle="--", label=f"{p}h period")
+
+        plt.xlabel("Frequency (1/hour)")
+        plt.ylabel("Magnitude")
+        plt.xlim(0, 0.1)  # 관심 주파수 범위로 확대
+        plt.title(f"Demand FFT (batch {b})")
+        plt.legend()
+        plt.grid(True)
+
+        save_path = img_dir / f"demand_fft_batch_{b}.png"
+        print(f"Saving FFT plot to {save_path}")
+        plt.tight_layout()
+        plt.savefig(save_path)
+        plt.close()
+
 
 if __name__ == "__main__":
     # 스크립트 기준 경로 고정
@@ -423,7 +351,7 @@ if __name__ == "__main__":
     img_dir = base_dir.parent / 'imgs'
 
     # 1) 데이터 로드
-    csv_path = data_dir / 'essential_columns.csv'
+    csv_path = data_dir / 'extraction.csv'
     df = pd.read_csv(csv_path, encoding='cp949')
     # 필수 컬럼 확인 (xpos, ypos, call_date)
     for col in ['xpos', 'ypos', 'call_date']:
@@ -435,16 +363,7 @@ if __name__ == "__main__":
     X = df[['xpos', 'ypos']].to_numpy(dtype=float)
     n = X.shape[0]
     if n == 0:
-        # 빈 입력 방어
-        outjson = OutJson(
-            minHour=pd.Timestamp.now(),
-            maxHour=pd.Timestamp.now(),
-            total_nodes=0,
-            edges=[],
-            demands=[],
-        )
-        outjson.save_json(data_dir / 'gwn_data.json')
-        raise SystemExit(0)
+        raise Exception("n == 0")
 
     # 3) K-means 학습
     centroids, labels = kmeans_fit(X, K)
@@ -461,8 +380,10 @@ if __name__ == "__main__":
     if kept_indices.size > 0:
         kept_centroids = centroids[kept_indices]
     else:
-        kept_centroids = np.zeros((0, 2))
+        raise Exception("유효한 cluster가 없음")
     reassigned = reassign_removed(X, kept_centroids, labels_after_small, R)
+
+    print(reassigned.shape)
 
     # 재할당된 포인트에만 kept_indices 매핑 적용
     final_labels = reassigned.copy()
@@ -481,54 +402,49 @@ if __name__ == "__main__":
     # 중심 재계산 (재할당 반영)
     final_centroids = recompute_centroids(X, compressed_labels, num_nodes)
 
-    node_arrays, C_arr = node_arrays_and_covariances(X, compressed_labels)
+    print(f'Final number of nodes: {num_nodes}')
+    print(f'Dropped points: {np.sum(compressed_labels == -1)} / {n} ({np.sum(compressed_labels == -1) / n:.2%})')
 
-    # 8) 엣지 구성 (거리 < MAX_NODE_DIST)
-    # Mahalanobis 기반 엣지 생성: node_arrays, C_arr 사용
-    edges = build_edges_mahalanobis(node_arrays, C_arr, TRUST_RANGE, CONNECTION_THRESHOLD)
+    #centroid의 지도상 위치 표시
+    visualize_clusters(X, compressed_labels, final_centroids, img_dir / 'kmeans_result.png')
+    #각 centroid의 point를 그래프로 표시
+    visualize_allocation(compressed_labels, num_nodes, img_dir / 'kmeans_allocation.png')
 
-    # Debug/log: show edges summary to help explain missing labels/lines in plot
-    print(f"DEBUG: edges count = {len(edges)}")
-    if len(edges) > 0:
-        print("DEBUG: sample edges (up to 20):")
-        for e in edges[:20]:
-            print(" ", e)
-        connected_nodes = set()
-        for a, b, _ in edges:
-            connected_nodes.add(int(a)); connected_nodes.add(int(b))
-        print(f"DEBUG: connected node count = {len(connected_nodes)} -> {sorted(list(connected_nodes))[:50]}")
-    else:
-        print(f"DEBUG: No edges found. TRUST_RANGE={TRUST_RANGE}, CONNECTION_THRESHOLD={CONNECTION_THRESHOLD}")
-
-    # 9) 수요 행렬 구성
+    # # 9) 수요 행렬 구성
     minHour, maxHour, demands = build_demands(df, compressed_labels, num_nodes)
-    sum_demands = sum(sum(row) for row in demands)
-    print(f'Sum of demands: {sum_demands}')
-    print(f'dropped points: {n - sum_demands} / {n} ({(n - sum_demands) / n:.2%})')
+    print(f'Demand time range: {minHour} to {maxHour}')
+    print(f'demands shape: {len(demands)} hours x {num_nodes} nodes')
+
+    demands_array = np.array(demands) #4368 * num_nodes
+    demand_fft(demands_array, img_dir)
+
+    mean_demand = np.mean(demands_array.reshape(-1, 7 * 24,num_nodes), axis=0)
+    print(f'Mean weekly demand shape: {mean_demand.shape}') # (7*24=168, num_nodes)
+    sum_demand = np.sum(mean_demand, axis=0)
+    five_summation(sum_demand)
+    np.save(data_dir / 'demands_array.npy', demands_array)
+
+
+    #파일이 있으면 불러오기
+    sim_matrix = compute_dtw_matrix(mean_demand.T)
+    #dtw 행렬 시각화
+    visualize_dtw(sim_matrix, img_dir / 'dtw_similarity.png')
+    np.save(data_dir / 'dtw_similarity.npy', sim_matrix)
+
+    # edges = []
+    # for u_idx, sims in enumerate(sim_matrix):
+    #     for v_idx, sim in enumerate(sims[u_idx:]):
+    #         if u_idx != v_idx and sim <= CONNECTION_THRESHOLD:
+    #             edges.append([u_idx, v_idx, float(sim)])
+    #             edges.append([v_idx, u_idx, float(sim)])  # 무향 그래프
+    # print(f'Number of edges: {len(edges)}')
 
     # 10) OutJson 저장
     outjson = OutJson(
         minHour=minHour,
         maxHour=maxHour,
         total_nodes=num_nodes,
-        edges=edges,
+        edges=[],
         demands=demands,
     )
     outjson.save_json(data_dir / 'gwn_data.json')
-
-    # # 11) 시각화 저장
-    plot_kmeans_partitions(
-        X,
-        compressed_labels,
-        final_centroids,
-        np.array([np.sum(compressed_labels == j) for j in range(num_nodes)]),
-        img_dir,
-        edges,
-    )
-
-
-    # 간단 로그
-    print(f"Total rows: {n}")
-    print(f"Initial K: {K} -> final nodes: {num_nodes}")
-    print(f"Edges: {len(edges)}")
-    print("Saved to", (data_dir / 'gwn_data.json').as_posix())
