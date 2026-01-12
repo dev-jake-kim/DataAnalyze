@@ -1,11 +1,12 @@
+import copy
 from pathlib import Path
 import numpy as np
 import json
 import heapq
 
-cluster_hierarchy = [64, 32, 16]
+cluster_hierarchy = [32, 16]
 MERGE_THRESHOLD = 8
-result = []
+result = set()
 
 
 class Cluster:
@@ -34,7 +35,7 @@ class Cluster:
         root1.size += root2.size
 
 
-if __name__ == "__main__":
+def make_clusters():
     base_dir = Path(__file__).resolve().parent
     data_dir = base_dir.parent / 'data'
     img_dir = base_dir.parent / 'imgs'
@@ -58,10 +59,13 @@ if __name__ == "__main__":
     print(f"heap size: {len(hq)}")
     hierarchy_pos = 0
 
+    for_cnt = 0
     # 클러스터 병합
     while hq:
+        for_cnt += 1
         dist, i, j = heapq.heappop(hq)
-        min_size = min([cluster.size for cluster in clusters])
+        active_sizes = [c.size for c in clusters if c.is_root()]
+        min_size = min(active_sizes)
         if min_size * MERGE_THRESHOLD <= clusters[i].find_set().size + clusters[j].find_set().size:
             continue
         # print(f"min_size: {min_size}, merging clusters {i} and {j} size: {clusters[i].size}, {clusters[j].size} with distance: {dist}")
@@ -85,12 +89,11 @@ if __name__ == "__main__":
                 if cnt % 3 == 0:
                     print()
             print()
-            result.append(dict_clusters)
+            for cls in dict_clusters.values():
+                result.add(tuple(cls))
 
             if hierarchy_pos >= len(cluster_hierarchy):
                 print(f"pos: {hierarchy_pos}, len: {len(cluster_hierarchy)}")
                 break
-    with open(data_dir / 'clustered_result.json', 'w') as f:
-        json.dump(result, f, indent=4)
-    print("Clustering completed.")
+    return result
             

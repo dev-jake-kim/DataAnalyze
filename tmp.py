@@ -1,61 +1,30 @@
-# python
-from pathlib import Path
-import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
 
-# 데이터 로드
-df = pd.read_csv(Path('data') / 'origin_data.csv', encoding='cp949')
+# 1. 데이터 입력
+data = [
+    (0.8, 0.5265),(0.5, 0.4607), (0.2, 0.4168), (0.1, 0.4017), (0, 0.399999)
+]
 
-# local_idx를 숫자로 변환(비숫자는 NaN)
-df['local_idx'] = pd.to_numeric(df['local_idx'], errors='coerce')
+# 2. x축 기준으로 데이터 정렬 (꺾은선이 꼬이지 않게 하기 위함)
+data.sort(key=lambda x: x[0])
 
-# 유효한(local_idx가 있는) 포인트와 결측 포인트 분리
-mask_valid = df['local_idx'].notna()
-mask_nan = ~mask_valid
+# 3. x, y 데이터 분리
+x_values = [d[0] for d in data]
+y_values = [d[1] for d in data]
 
-# 카테고리화(원래 값의 순서/레이블을 보존)
-cats = pd.Categorical(df.loc[mask_valid, 'local_idx'])
-codes = cats.codes  # 0 .. n-1
-n = len(cats.categories)
+# 4. 그래프 생성
+plt.figure(figsize=(10, 6))
+plt.plot(x_values, y_values, marker='o', linestyle='-', color='b', linewidth=2, markersize=6)
 
-# 컬러맵 선택: 범주가 많으면 연속형/광범위 cmap 사용
-cmap_name = 'tab20' if n <= 20 else 'nipy_spectral'
-cmap = plt.get_cmap(cmap_name, n)
+# 그래프 정보 설정
+plt.title('Calibration weight Line Plot', fontsize=14)
+plt.xlabel('alpha', fontsize=12)
+plt.ylabel('covered loss', fontsize=12)
 
-# 경계 정규화(BoundaryNorm을 사용해 정수 코드별로 색을 고정)
-norm = mcolors.BoundaryNorm(boundaries=np.arange(-0.5, n + 0.5, 1), ncolors=n)
+# y값이 급격히 줄어들므로 로그 스케일을 적용하면 작은 값의 변화도 잘 보입니다.
+# plt.yscale('log') # 필요 시 주석을 해제하여 사용하세요.
 
-plt.figure(figsize=(8, 6))
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.xticks(x_values) # 모든 x값이 표시되도록 설정
 
-# 유효한 포인트 산점도 (색은 codes 사용)
-sc = plt.scatter(
-    df.loc[mask_valid, 'xpos'],
-    df.loc[mask_valid, 'ypos'],
-    c=codes,
-    cmap=cmap,
-    norm=norm,
-    s=20,
-    alpha=0.8,
-    edgecolors='none'
-)
-
-# 결측(local_idx 없는) 포인트는 검정으로 표시
-if mask_nan.any():
-    plt.scatter(
-        df.loc[mask_nan, 'xpos'],
-        df.loc[mask_nan, 'ypos'],
-        c='black',
-        s=20,
-        alpha=0.8,
-        label='missing local_idx'
-    )
-
-# 컬러바 생성: scatter에서 받은 mappable(sc)를 전달
-cbar = plt.colorbar(sc, ticks=np.arange(0, n))
-cbar.ax.set_yticklabels([str(v) for v in cats.categories])
-cbar.set_label('local_idx')
-
-plt.tight_layout()
 plt.show()

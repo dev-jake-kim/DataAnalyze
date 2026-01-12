@@ -143,7 +143,7 @@ def eleminate_duplicates(df: pd.DataFrame,
     return df.drop(index=out_idx_to_drop)
 
 
-def crop_filter(df: pd.DataFrame, threshold_rate: float = 0.95, step_rate: float = 0.001) -> pd.DataFrame:
+def crop_filter(df: pd.DataFrame, threshold_rate: float = 0.85, step_rate: float = 0.001) -> pd.DataFrame:
     """
     중심점에서 멀리 있는 점들을 반복적으로 제거하여 데이터 수를 threshold_rate 비율까지 줄입니다.
     - 입력: df(xpos, ypos 필수)

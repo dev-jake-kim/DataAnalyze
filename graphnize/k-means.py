@@ -4,23 +4,28 @@ import pandas as pd
 from typing import Tuple, List
 from tqdm import tqdm  # 진행률 표시
 import matplotlib
+from scipy.spatial import ConvexHull
+from scipy.signal import find_peaks  # 추가됨
+
+from graphnize.makeset import make_clusters
+
 matplotlib.use("Agg")  # 서버/헤드리스 환경에서도 저장 가능
 import matplotlib.pyplot as plt
 # from tslearn.metrics import cdist_dtw
 from numba import njit, prange
-
 from outjson import OutJson
 
 # 하이퍼파라미터
-K = 150       # 초기 클러스터 개수
-R = 5000          # 클러스터 중심으로부터 허용 반경 (이상은 제거)
-POW = 183*10        # 클러스터 최소 데이터 수 (이하 클러스터 제거)
-MAX_NODE_DIST = 10000  # 노드 간 연결 최대 거리(이상은 미연결)
+K = 200       # 초기 클러스터 개수
+R = 2500          # 클러스터 중심으로부터 허용 반경 (이상은 제거)
+POW = 183*10       # 클러스터 최소 데이터 수 (이하 클러스터 제거)
+MAX_NODE_DIST = 8000  # 노드 간 연결 최대 거리(이상은 미연결)
 MAX_ITER = 100    # K-means 반복 횟수
-SEED = 13         # 재현성
+SEED = 42         # 재현성
 NUM_OF_DAYS = 182
 
-CONNECTION_THRESHOLD = 10
+CONNECTION_THRESHOLD = 1.8
+CLUSTER_CONNECTION_THRESHOLD = 2.5
 
 
 def _init_centroids_kpp(X: np.ndarray, k: int, rng: np.random.Generator) -> np.ndarray:
@@ -185,26 +190,61 @@ def build_demands(df: pd.DataFrame, labels: np.ndarray, num_nodes: int) -> Tuple
     return minHour, maxHour, demands.tolist()
 
 # 8) centroid 시각화 함수
-def visualize_clusters(X: np.ndarray, labels: np.ndarray, centroids: np.ndarray, save_path: Path) -> None:
-    """클러스터 결과 시각화 및 저장."""
+def visualize_clusters(X: np.ndarray, labels: np.ndarray, centroids: np.ndarray, save_path: Path, n: int = 9) -> float:
+    """클러스터별 면적 합계가 전체 면적에서 차지하는 비율을 반환합니다."""
     plt.figure(figsize=(10, 10))
+
     unique_labels = np.unique(labels)
     colors = plt.cm.get_cmap('tab20', len(unique_labels))
 
-    for i, lbl in enumerate(unique_labels):
-        cluster_points = X[labels == lbl]
-        plt.scatter(cluster_points[:, 0], cluster_points[:, 1], s=5, color=colors(i), alpha=0.6) #label=f'Cluster {lbl}' if lbl != -1 else 'Removed',
+    # 1. 전체 면적 계산 (격자 설정 범위 기준)
+    x_min, x_max = X[:, 0].min(), X[:, 0].max()
+    y_min, y_max = X[:, 1].min(), X[:, 1].max()
+    total_area = (x_max - x_min) * (y_max - y_min)
 
-    # 중심점 표시
+    # 2. 클러스터별 면적 계산 (방법 B)
+    total_cluster_area = 0.0
+
+    # 클러스터별 데이터 산점도 및 면적 합산
+    for i, lbl in enumerate(unique_labels):
+        cluster_mask = (labels == lbl)
+        cluster_points = X[cluster_mask]
+
+        # 산점도 그리기
+        plt.scatter(cluster_points[:, 0], cluster_points[:, 1], s=5, color=colors(i), alpha=0.6)
+
+        # 면적 계산 (label -1은 노이즈로 간주하여 제외하거나, 포함하려면 조건 수정)
+        if lbl != -1 and len(cluster_points) >= 3:
+            try:
+                hull = ConvexHull(cluster_points)
+                total_cluster_area += hull.volume  # 2D에서 hull.volume은 면적을 의미함
+            except:
+                # 점들이 일직선상에 있는 등 ConvexHull을 만들 수 없는 경우 예외 처리
+                pass
+
+    # 3. 중심점 표시
     plt.scatter(centroids[:, 0], centroids[:, 1], s=100, color='black', marker='x', label='Centroids')
 
-    plt.title('K-means Clustering Result')
+    # 4. 격자 설정 및 그래프 꾸미기
+    x_edges = np.linspace(x_min, x_max, n + 1)
+    y_edges = np.linspace(y_min, y_max, n + 1)
+    plt.xticks(x_edges)
+    plt.yticks(y_edges)
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    # 퍼센트 계산
+    area_percentage = (total_cluster_area / total_area) * 100 if total_area > 0 else 0.0
+
+    plt.title(f'K-means Clustering (Occupied Area: {area_percentage:.2f}%)')
     plt.xlabel('X Position')
     plt.ylabel('Y Position')
     plt.legend(markerscale=2)
-    plt.grid(True)
+
+    plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+
+    return float(area_percentage)
 
 #각 centroid의 point개수 시각화 함수(막대 그래프)
 def visualize_allocation(labels: np.ndarray, num_nodes: int, save_path: Path) -> None:
@@ -295,53 +335,59 @@ def five_summation(arr):
         print(f"{label:<10} | {idx:<8} | {arr[idx]:<5}")
 
 def demand_fft(demands_array: np.ndarray, img_dir: Path):
-    """
-    demands_array: (timestep, batch)
-    img_dir: Path to save fft plots
-    """
     demands_array = demands_array[:, :1]
     T, B = demands_array.shape
-    time_step_hours = 1.0  # 1 hour sampling
-
-    # target periods (hours)
-    target_periods = [24, 168]  # daily, weekly
-    target_indices = [int(T / p) for p in target_periods]
+    time_step_hours = 1.0
 
     for b in range(B):
         x = demands_array[:, b]
-
-        # remove mean (important for periodicity analysis)
         x = x - np.mean(x)
 
-        # FFT
         fft_vals = np.fft.rfft(x)
         magnitude = np.abs(fft_vals)
-
         freqs = np.fft.rfftfreq(T, d=time_step_hours)
-
-        # avoid zero freq
         magnitude[0] = 0.0
 
-        plt.figure(figsize=(10, 5))
-        plt.plot(freqs, magnitude, label="FFT Magnitude")
+        # --- 수정된 부분: 인접한 값이 아닌 진짜 '봉우리'를 찾음 ---
+        # distance: 피크 사이의 최소 간격 (여기서는 인덱스 거리)
+        # 24시간 근처에서 여러 개가 잡히지 않도록 적절한 간격을 줍니다.
+        peaks, properties = find_peaks(magnitude, distance=5) 
+        
+        # 찾은 피크들 중 magnitude가 큰 순서대로 상위 5개 추출
+        peak_magnitudes = magnitude[peaks]
+        top_n_indices = peaks[np.argsort(peak_magnitudes)[-5:][::-1]]
+        # ---------------------------------------------------
 
-        # mark 24h / 168h periodicity
-        for p, k in zip(target_periods, target_indices):
-            if k < len(freqs):
-                plt.axvline(freqs[k], linestyle="--", label=f"{p}h period")
+        plt.figure(figsize=(12, 6))
+        plt.plot(freqs, magnitude, label="FFT Magnitude", color='royalblue', alpha=0.7)
+
+        for i, idx in enumerate(top_n_indices):
+            f = freqs[idx]
+            mag = magnitude[idx]
+            period = 1/f if f != 0 else float('inf')
+            
+            plt.axvline(f, color='red', linestyle="--", alpha=0.3)
+            plt.text(f, mag, f'({period:.1f}h)', 
+                     color='red', fontsize=9, verticalalignment='bottom', horizontalalignment='center')
 
         plt.xlabel("Frequency (1/hour)")
         plt.ylabel("Magnitude")
-        plt.xlim(0, 0.1)  # 관심 주파수 범위로 확대
-        plt.title(f"Demand FFT (batch {b})")
+        plt.xlim(0, 0.1)
+        plt.title(f"Demand FFT - Distinct Top Peaks")
         plt.legend()
-        plt.grid(True)
+        plt.grid(True, alpha=0.3)
 
-        save_path = img_dir / f"demand_fft_batch_{b}.png"
-        print(f"Saving FFT plot to {save_path}")
+        save_path = img_dir / f"demand_fft_top_peaks_{b}.png"
         plt.tight_layout()
         plt.savefig(save_path)
         plt.close()
+
+def assign_matrix(num_nodes: int, clusters: List[List[int]]) -> np.ndarray:
+    assign = np.zeros((num_nodes, len(clusters)), dtype=int)
+    for c_idx, cluster in enumerate(clusters):
+        for node in cluster:
+            assign[node, c_idx] = 1
+    return assign
 
 
 if __name__ == "__main__":
@@ -406,7 +452,7 @@ if __name__ == "__main__":
     print(f'Dropped points: {np.sum(compressed_labels == -1)} / {n} ({np.sum(compressed_labels == -1) / n:.2%})')
 
     #centroid의 지도상 위치 표시
-    visualize_clusters(X, compressed_labels, final_centroids, img_dir / 'kmeans_result.png')
+    coverage = visualize_clusters(X, compressed_labels, final_centroids, img_dir / 'kmeans_result.png')
     #각 centroid의 point를 그래프로 표시
     visualize_allocation(compressed_labels, num_nodes, img_dir / 'kmeans_allocation.png')
 
@@ -431,20 +477,49 @@ if __name__ == "__main__":
     visualize_dtw(sim_matrix, img_dir / 'dtw_similarity.png')
     np.save(data_dir / 'dtw_similarity.npy', sim_matrix)
 
-    # edges = []
-    # for u_idx, sims in enumerate(sim_matrix):
-    #     for v_idx, sim in enumerate(sims[u_idx:]):
-    #         if u_idx != v_idx and sim <= CONNECTION_THRESHOLD:
-    #             edges.append([u_idx, v_idx, float(sim)])
-    #             edges.append([v_idx, u_idx, float(sim)])  # 무향 그래프
-    # print(f'Number of edges: {len(edges)}')
+    edges = []
+    n_nodes = sim_matrix.shape[0]
+    for u_idx in range(n_nodes):
+        for v_idx in range(u_idx + 1, n_nodes):  # 자기 자신 제외, 상삼각 행렬만 순회
+            sim = sim_matrix[u_idx, v_idx]
+            if sim <= CONNECTION_THRESHOLD:
+                edges.append([u_idx, v_idx, float(sim)])
+                edges.append([v_idx, u_idx, float(sim)])
+    print(f'Number of edges: {len(edges)}')
+
+    clusters = list(make_clusters())
+    print(len(clusters))
+    num_clusters = len(clusters)
+    assigns = assign_matrix(num_nodes, clusters)
+    np.save(data_dir / 'assign_matrix.npy', assigns)
+    cluster_demands = np.matmul(demands_array, assigns)
+    np.save(data_dir / 'cluster_demands.npy', cluster_demands)
+
+    #dtw
+    cluster_mean_demand = np.mean(cluster_demands.reshape(-1, 7 * 24, num_clusters), axis=0)
+    cluster_sim_matrix = compute_dtw_matrix(cluster_mean_demand.T)
+    visualize_dtw(cluster_sim_matrix, img_dir / 'cluster_dtw_similarity.png')
+    np.save(data_dir / 'cluster_dtw_similarity.npy', cluster_sim_matrix)
+
+    cluster_edges = []
+    for u_idx in range(num_clusters):
+        for v_idx in range(u_idx + 1, num_clusters):  # 자기 자신 제외, 상삼각 행렬만 순회
+            sim = cluster_sim_matrix[u_idx, v_idx]
+            if sim <= CLUSTER_CONNECTION_THRESHOLD:
+                cluster_edges.append([u_idx, v_idx, float(sim)])
+                cluster_edges.append([v_idx, u_idx, float(sim)])
+    print(f'Number of cluster edges: {len(cluster_edges)}')
 
     # 10) OutJson 저장
     outjson = OutJson(
         minHour=minHour,
         maxHour=maxHour,
         total_nodes=num_nodes,
-        edges=[],
+        edges=edges,
         demands=demands,
+        coverage=coverage,
+        assignment_adj=assigns.tolist(),
+        clusters_demand=cluster_demands.tolist(),
+        clusters_edge=cluster_edges,
     )
     outjson.save_json(data_dir / 'gwn_data.json')
