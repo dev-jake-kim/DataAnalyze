@@ -509,7 +509,7 @@ if __name__ == "__main__":
                 cluster_edges.append([u_idx, v_idx, float(sim)])
                 cluster_edges.append([v_idx, u_idx, float(sim)])
     print(f'Number of cluster edges: {len(cluster_edges)}')
-
+    
     # 10) OutJson 저장
     outjson = OutJson(
         minHour=minHour,
@@ -517,8 +517,7 @@ if __name__ == "__main__":
         total_nodes=num_nodes,
         edges=edges,
         demands=demands,
-        coverage=coverage,
-        assignment_adj=assigns.tolist(),
+        assignment_matrix=assigns.tolist(),
         clusters_demand=cluster_demands.tolist(),
         clusters_edge=cluster_edges,
     )

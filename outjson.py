@@ -3,18 +3,17 @@ from pathlib import Path
 from typing import Dict, Any
 
 class OutJson:
-    def __init__(self, minHour, maxHour, self_loop_w=1.0, total_nodes=0, edges=None, coverage = 0, demands=None, assignment_adj=None, clusters_demand=None, clusters_edge=None, dropped_demand=0):
+    def __init__(self, minHour, maxHour, self_loop_w=1.0, total_nodes=0, edges=None, demands=None, assignment_matrix=None, clusters_demand=None, clusters_edge=None, dropped_demand=0):
         self.minHour = minHour
         self.maxHour = maxHour
         self.self_loop_w = self_loop_w
         self.total_nodes = total_nodes
         self.edges = edges if edges is not None else []
         self.demands = demands if demands is not None else []
-        self.coverage = coverage
-        self.assignment_assigns = assignment_adj
+        self.assignment_matrix = assignment_matrix
         self.clusters_demand = clusters_demand
         self.clusters_edge = clusters_edge
-        self.additional_loss = (1-coverage) / len(demands) * dropped_demand
+        self.dropped_points = dropped_demand
 
 
     def to_dict(self) -> Dict[str, Any]:
@@ -29,8 +28,7 @@ class OutJson:
                 "hours": hours,
                 "self_loop_w": self.self_loop_w,
                 "edge_weight": "geom_mean",
-                "coverage": self.coverage,
-                "additional_loss": self.additional_loss
+                "dropped_points": self.dropped_points
             },
             "nodes": [{"id": i} for i in range(self.total_nodes)],
             "edges": [
@@ -38,7 +36,7 @@ class OutJson:
                 for e in self.edges
             ],
             "x": self.demands,
-            "cluster_assignment": self.assignment_assigns,
+            "cluster_assignment": self.assignment_matrix,
             "clusters_demands": self.clusters_demand,
             "clusters_edges": [
                 {"u": int(e[0]), "v": int(e[1]), "w": float(e[2])}

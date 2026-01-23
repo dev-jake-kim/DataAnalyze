@@ -22,5 +22,5 @@ def gridhitmap(grid, logscale: bool = False, title="Grid Hitmap", save_path=None
     plt.axis('off')
     if save_path:
         plt.savefig(save_path, bbox_inches='tight', facecolor='white')
-    plt.show()
+        print(f"Heatmap saved to {save_path}")
     plt.close()
