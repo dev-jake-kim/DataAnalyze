@@ -1,4 +1,5 @@
 from pathlib import Path
+from httpx import patch
 import pandas as pd
 import numpy as np
 import pulp
@@ -16,11 +17,12 @@ from visualize.grid2hitmap import gridhitmap
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 
-GRID_SIZE = 9500
-CONNECTION_THRESHOLD = 4
-CLUSTER_CONNECTION_THRESHOLD = 15
+GRID_SIZE = 1000
+# CONNECTION_THRESHOLD = 4
+# CLUSTER_CONNECTION_THRESHOLD = 15
+#GAMMA = 0.1
 
-N = 25
+N = 50
 A = 7000 // GRID_SIZE
 B = A
 
@@ -153,14 +155,14 @@ if __name__ == "__main__":
         demands.append(demand)
     demands = np.array(demands)
 
-    print(f'Demands shape: {demands.shape}')
+    print(f'Demands shape: {demands.shape}') # (N, T)
     np.save(output_dir / f'demands({GRID_SIZE}){N}_{A}x{B}.npy', demands)
 
-    weekly_demands = demands.reshape(demands.shape[0], -1, 7*24).mean(axis=1)
-    print(f'Weekly demands shape: {weekly_demands.shape}')
+    #weekly_demands = demands.reshape(demands.shape[0], -1, 7*24).mean(axis=1) # (N, 7*24)
+    #print(f'Weekly demands shape: {weekly_demands.shape}')
     #np.save(output_dir / f'weekly_demands({GRID_SIZE})_{N}_{A}x{B}.npy', weekly_demands)
 
-    dtw_distances = compute_dtw_matrix(weekly_demands) if not (output_dir / f'dtw_distances({GRID_SIZE}){N}_{A}x{B}.npy').exists() else np.load(output_dir / f'dtw_distances({GRID_SIZE}){N}_{A}x{B}.npy')
+    dtw_distances = compute_dtw_matrix(demands) if not (output_dir / f'dtw_distances({GRID_SIZE}){N}_{A}x{B}.npy').exists() else np.load(output_dir / f'dtw_distances({GRID_SIZE}){N}_{A}x{B}.npy')
     np.save(output_dir / f'dtw_distances({GRID_SIZE}){N}_{A}x{B}.npy', dtw_distances)
 
     visualize_dtw(dtw_distances, save_path=img_dir / f'dtw_distance_distribution({GRID_SIZE})_{N}_{A}x{B}.png')
@@ -175,37 +177,38 @@ if __name__ == "__main__":
     edges = []
     for i in range(num_nodes):
         for j in range(i + 1, num_nodes):
-            if dtw_distances[i, j] > CONNECTION_THRESHOLD:
-                continue
-            edges.append((i, j, dtw_distances[i, j]))
-            edges.append((j, i, dtw_distances[i, j]))
+            dist = patches[i][0] - patches[j][0], patches[i][1] - patches[j][1]
+            dist = (dist[0]**2 + dist[1]**2) ** 0.5 
+            
+            edges.append((i, j, dist, dtw_distances[i, j]))
+            edges.append((j, i, dist, dtw_distances[i, j]))
     print(f'Number of edges: {len(edges)}')
 
-    assign_matrix = make_clusters(demands, dtw_distances, [8])
-    print(f'Assign matrix shape: {assign_matrix.shape}')
-    np.save(output_dir / f'assign_matrix({GRID_SIZE})_{N}_{A}x{B}.npy', assign_matrix)
+#     assign_matrix = make_clusters(demands, dtw_distances, [8])
+#     print(f'Assign matrix shape: {assign_matrix.shape}')
+#     np.save(output_dir / f'assign_matrix({GRID_SIZE})_{N}_{A}x{B}.npy', assign_matrix)
 
-    cluster_demands = np.matmul(assign_matrix.T, demands) # T, C
-    #np.save(output_dir / f'cluster_demands_{N}_{A}x{B}.npy', cluster_demands)
-   # print(f'Cluster demands shape: {cluster_demands.shape}')
+#     cluster_demands = np.matmul(assign_matrix.T, demands) # T, C
+#     #np.save(output_dir / f'cluster_demands_{N}_{A}x{B}.npy', cluster_demands)
+#    # print(f'Cluster demands shape: {cluster_demands.shape}')
 
-    weekly_cluster_demands = cluster_demands.reshape(cluster_demands.shape[0], -1, 7*24).mean(axis=1)
-    #np.save(output_dir / f'weekly_cluster_demands_{N}_{A}x{B}.npy', weekly_cluster_demands)
+#     weekly_cluster_demands = cluster_demands.reshape(cluster_demands.shape[0], -1, 7*24).mean(axis=1)
+#     #np.save(output_dir / f'weekly_cluster_demands_{N}_{A}x{B}.npy', weekly_cluster_demands)
     
-    cluster_dtw_distances = compute_dtw_matrix(weekly_cluster_demands) if not (output_dir / f'cluster_dtw_distances({GRID_SIZE})_{N}_{A}x{B}.npy').exists() else np.load(output_dir / f'cluster_dtw_distances({GRID_SIZE})_{N}_{A}x{B}.npy')
-    np.save(output_dir / f'cluster_dtw_distances({GRID_SIZE})_{N}_{A}x{B}.npy', cluster_dtw_distances)
+#     cluster_dtw_distances = compute_dtw_matrix(weekly_cluster_demands) if not (output_dir / f'cluster_dtw_distances({GRID_SIZE})_{N}_{A}x{B}.npy').exists() else np.load(output_dir / f'cluster_dtw_distances({GRID_SIZE})_{N}_{A}x{B}.npy')
+#     np.save(output_dir / f'cluster_dtw_distances({GRID_SIZE})_{N}_{A}x{B}.npy', cluster_dtw_distances)
 
-    cluster_edges = []
-    num_clusters = cluster_demands.shape[0]
-    for i in range(num_clusters):
-        for j in range(i + 1, num_clusters):
-            if cluster_dtw_distances[i, j] > CLUSTER_CONNECTION_THRESHOLD:
-                continue
-            cluster_edges.append((i, j, cluster_dtw_distances[i, j]))
-            cluster_edges.append((j, i, cluster_dtw_distances[i, j]))
-    print(f'Number of cluster edges: {len(cluster_edges)}')
-    cluster_dtw_distances_arr = np.sort(cluster_dtw_distances.copy().flatten())[num_clusters:]  # 자기 자신과의 거리는 제외    
-    five_num(cluster_dtw_distances_arr, 'Cluster DTW Distance Statistics')
+#     cluster_edges = []
+#     num_clusters = cluster_demands.shape[0]
+#     for i in range(num_clusters):
+#         for j in range(i + 1, num_clusters):
+#             if cluster_dtw_distances[i, j] > CLUSTER_CONNECTION_THRESHOLD:
+#                 continue
+#             cluster_edges.append((i, j, cluster_dtw_distances[i, j]))
+#             cluster_edges.append((j, i, cluster_dtw_distances[i, j]))
+#     print(f'Number of cluster edges: {len(cluster_edges)}')
+#     cluster_dtw_distances_arr = np.sort(cluster_dtw_distances.copy().flatten())[num_clusters:]  # 자기 자신과의 거리는 제외    
+#     five_num(cluster_dtw_distances_arr, 'Cluster DTW Distance Statistics')
     # print(weekly_demands.shape[1])
 
     OutJson(
@@ -215,9 +218,9 @@ if __name__ == "__main__":
         total_nodes=len(patches),
         edges=edges,
         demands=demands.T.tolist(),
-        assignment_matrix=assign_matrix.tolist(),
-        clusters_demand=cluster_demands.T.tolist(),
-        clusters_edge=cluster_edges,
+        assignment_matrix=[],#assign_matrix.tolist(),
+        clusters_demand=[],#cluster_demands.T.tolist(),
+        clusters_edge=[],# cluster_edges,
         dropped_demand=int(sum_grid.sum() - total_score) / demands.shape[1],
     ).save_json(output_dir / 'gwn_data.json')
 

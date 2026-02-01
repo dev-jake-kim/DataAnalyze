@@ -20,6 +20,7 @@ dependencies = [
     "sktime>=0.40.1",
     "scipy-stubs>=1.17.0.0",
     "pulp>=3.3.0",
+    "geopandas>=1.1.2",
 ]
 
 [dependency-groups]

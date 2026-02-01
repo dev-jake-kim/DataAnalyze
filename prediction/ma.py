@@ -77,8 +77,12 @@ def tune_moving_averages(data, window_sizes):
 # --- 실행 예시 ---
 
 # 1. 데이터 생성 (노드 10개, 타임스텝 100개)
-# 사인파 + 노이즈로 시계열 데이터 흉내
-data = np.load('output\demands50_7x7.npy').sum(axis=0).reshape(1, -1)
+import json
+from pathlib import Path
+source_path = Path('output')
+with open(source_path / 'gwn_data.json', 'r', encoding='utf-8') as f:
+    gwn_data = json.load(f)
+data = np.array(gwn_data['x'])
 print(data.shape)
 
 # 2. 튜닝할 윈도우 사이즈 목록

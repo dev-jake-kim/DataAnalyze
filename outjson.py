@@ -32,14 +32,14 @@ class OutJson:
             },
             "nodes": [{"id": i} for i in range(self.total_nodes)],
             "edges": [
-                {"u": int(e[0]), "v": int(e[1]), "w": float(e[2])}
+                {"u": int(e[0]), "v": int(e[1]), "w_dist": float(e[2]), "w_dtw": float(e[3])}
                 for e in self.edges
             ],
             "x": self.demands,
             "cluster_assignment": self.assignment_matrix,
             "clusters_demands": self.clusters_demand,
             "clusters_edges": [
-                {"u": int(e[0]), "v": int(e[1]), "w": float(e[2])}
+                {"u": int(e[0]), "v": int(e[1]), "w_dist": float(e[2]), "w_dtw": float(e[3])}
                 for e in self.clusters_edge
             ]
         }

@@ -1,30 +1,50 @@
+import geopandas as gpd
 import matplotlib.pyplot as plt
 
-# 1. 데이터 입력
-data = [
-    (0.8, 0.5265),(0.5, 0.4607), (0.2, 0.4168), (0.1, 0.4017), (0, 0.399999)
-]
+# 1. 파일 경로 설정 (사용자님의 파일명으로 변경하세요)
+file_path = "data/UPIS_C_UQ111.shp" 
 
-# 2. x축 기준으로 데이터 정렬 (꺾은선이 꼬이지 않게 하기 위함)
-data.sort(key=lambda x: x[0])
+# 2. 파일 읽기 (한글 깨짐 방지를 위해 encoding 설정 필수)
+try:
+    gdf = gpd.read_file(file_path, encoding='euc-kr')
+except:
+    gdf = gpd.read_file(file_path, encoding='cp949') # euc-kr이 안 되면 cp949 시도
 
-# 3. x, y 데이터 분리
-x_values = [d[0] for d in data]
-y_values = [d[1] for d in data]
+# 3. 데이터 전처리: 암호 같은 코드를 '한글'로 변환
+# UQA1xx: 주거, UQA2xx: 상업, UQA3xx: 공업, UQA4xx: 녹지
+zoning_map = {
+    'UQA1': 'housing',
+    'UQA2': 'commercial',
+    'UQA3': 'industrial',
+    'UQA4': 'green_space'
+}
 
-# 4. 그래프 생성
-plt.figure(figsize=(10, 6))
-plt.plot(x_values, y_values, marker='o', linestyle='-', color='b', linewidth=2, markersize=6)
+# 'ATRB_SE' 컬럼의 앞 4글자만 잘라서 매핑 (값이 없는 경우 '기타'로 처리)
+if 'ATRB_SE' in gdf.columns:
+    gdf['land_use'] = gdf['ATRB_SE'].str[:4].map(zoning_map).fillna('other')
+else:
+    print("경고: 'ATRB_SE' 컬럼이 없습니다. 컬럼명을 확인하세요.")
+    print(gdf.columns)
+    # 만약 컬럼명이 다르면 여기서 멈추도록 처리하거나 다른 컬럼을 사용해야 합니다.
 
-# 그래프 정보 설정
-plt.title('Calibration weight Line Plot', fontsize=14)
-plt.xlabel('alpha', fontsize=12)
-plt.ylabel('covered loss', fontsize=12)
+# 4. 시각화 (지도 그리기)
+# figsize: 그림 크기 (가로, 세로)
+fig, ax = plt.subplots(figsize=(12, 12))
 
-# y값이 급격히 줄어들므로 로그 스케일을 적용하면 작은 값의 변화도 잘 보입니다.
-# plt.yscale('log') # 필요 시 주석을 해제하여 사용하세요.
+# column='land_use': 이 컬럼을 기준으로 색깔을 다르게 칠함
+# legend=True: 범례 표시
+# cmap='Set2': 색상 테마 (Pastel1, Set1, viridis 등 변경 가능)
+gdf.plot(column='land_use', 
+         ax=ax, 
+         legend=True, 
+         cmap='Set1', 
+         edgecolor='black', 
+         linewidth=0.1)
 
-plt.grid(True, linestyle='--', alpha=0.7)
-plt.xticks(x_values) # 모든 x값이 표시되도록 설정
+# 5. 그래프 꾸미기
+plt.title('purpose of land use', fontsize=15)
+plt.axis('off') # x, y축 눈금 제거 (깔끔하게 보기 위해)
 
-plt.show()
+# 6. 화면에 출력 (또는 파일로 저장)
+plt.savefig("ulsan_map_check.png", dpi=600)  # 고해상도 파일로 저장
+# plt.savefig("ulsan_map_check.png") # 파일로 저장하려면 주석 해제
