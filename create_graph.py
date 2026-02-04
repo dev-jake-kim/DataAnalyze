@@ -122,6 +122,10 @@ def load_and_preprocess_data(csv_path: Path) -> tuple[pd.DataFrame, gpd.GeoDataF
     )
     gdf = gdf.to_crs(TARGET_CRS)
     
+    # dest 컬럼이 있는지 확인하고 유지
+    if 'dest_xpos' in df.columns and 'dest_ypos' in df.columns:
+        print(f"  Destination columns preserved")
+    
     return df, gdf
 
 
@@ -345,10 +349,28 @@ def create_integrated_nodes(patches: np.ndarray, patch_size: int, bounds: tuple,
             'node_id': idx,
             'lat': float(lat),
             'lon': float(lon),
-            'composition': node_compositions[idx]
+            'composition': node_compositions[idx],
+            'size': (patch_size)**2 * (grid_size/1000)**2  # km² 단위
         })
     
     return nodes
+
+
+def create_coord_to_node_mapping(patches: np.ndarray, patch_size: int,
+                                 bounds: tuple[float, float, float, float]) -> dict:
+    """
+    좌표(grid row, col)를 노드 인덱스로 매핑하는 딕셔너리 생성
+    Returns: {(row, col): node_idx}
+    """
+    coord_to_node = {}
+    
+    for node_idx, (r, c) in enumerate(patches):
+        # 패치가 커버하는 모든 grid cell
+        for dr in range(patch_size):
+            for dc in range(patch_size):
+                coord_to_node[(r + dr, c + dc)] = node_idx
+    
+    return coord_to_node
 
 
 def extract_node_demands(temporal_grid: np.ndarray, patches: np.ndarray,
@@ -376,6 +398,106 @@ def extract_node_demands(temporal_grid: np.ndarray, patches: np.ndarray,
     print(f"  Average demand per node per hour: {demands.mean():.2f}")
     
     return demands
+
+
+def extract_od_flows(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
+                    unique_hours: list, coord_to_node: dict,
+                    bounds: tuple[float, float, float, float]) -> list[list[dict]]:
+    """
+    각 시간 스텝에 대한 OD 흐름 추출
+    Returns: List[List[Dict]] - 각 timestep별 OD 흐름 리스트
+    """
+    print("\n" + "="*60)
+    print("Extracting OD flows")
+    print("="*60)
+    
+    min_x, max_x, min_y, max_y = bounds
+    
+    # dest 컬럼이 있는지 확인
+    if 'dest_xpos' not in df.columns or 'dest_ypos' not in df.columns:
+        print("  No destination columns found, skipping OD extraction")
+        return [[] for _ in range(len(unique_hours))]
+    
+    # 결측치 제거
+    df_with_dest = df.dropna(subset=['dest_xpos', 'dest_ypos']).copy()
+    print(f"  Records with valid destinations: {len(df_with_dest):,} / {len(df):,}")
+    
+    if len(df_with_dest) == 0:
+        return [[] for _ in range(len(unique_hours))]
+    
+    # 시간 인덱스 추가
+    df_with_dest['hour'] = df_with_dest['call_date'].dt.floor('H')
+    hour_to_idx = {hour: idx for idx, hour in enumerate(unique_hours)}
+    df_with_dest['time_idx'] = df_with_dest['hour'].map(hour_to_idx)
+    
+    # 출발지 좌표를 EPSG:5174로 변환 (이미 gdf에 있음)
+    origin_coords = gdf.loc[df_with_dest.index]
+    origin_x = origin_coords.geometry.x.values
+    origin_y = origin_coords.geometry.y.values
+    
+    # 도착지 좌표를 EPSG:5174로 변환
+    df_with_dest['dest_lon'] = df_with_dest['dest_xpos'] / 1_000_000
+    df_with_dest['dest_lat'] = df_with_dest['dest_ypos'] / 1_000_000
+    
+    gdf_dest = gpd.GeoDataFrame(
+        df_with_dest[['dest_lon', 'dest_lat']],
+        geometry=gpd.points_from_xy(df_with_dest['dest_lon'], df_with_dest['dest_lat']),
+        crs='EPSG:4326'
+    )
+    gdf_dest = gdf_dest.to_crs(TARGET_CRS)
+    
+    dest_x = gdf_dest.geometry.x.values
+    dest_y = gdf_dest.geometry.y.values
+    
+    # Grid 좌표 계산
+    origin_cols = ((origin_x - min_x) / GRID_SIZE).astype(int)
+    origin_rows = ((max_y - origin_y) / GRID_SIZE).astype(int)
+    dest_cols = ((dest_x - min_x) / GRID_SIZE).astype(int)
+    dest_rows = ((max_y - dest_y) / GRID_SIZE).astype(int)
+    
+    # 각 레코드에 대해 출발/도착 노드 매핑
+    df_with_dest['origin_node'] = -1
+    df_with_dest['dest_node'] = -1
+    
+    for idx in range(len(df_with_dest)):
+        origin_coord = (origin_rows[idx], origin_cols[idx])
+        dest_coord = (dest_rows[idx], dest_cols[idx])
+        
+        df_with_dest.iloc[idx, df_with_dest.columns.get_loc('origin_node')] = coord_to_node.get(origin_coord, -1)
+        df_with_dest.iloc[idx, df_with_dest.columns.get_loc('dest_node')] = coord_to_node.get(dest_coord, -1)
+    
+    # 유효한 OD만 필터링 (둘 다 노드에 속함)
+    valid_od = df_with_dest[(df_with_dest['origin_node'] >= 0) & (df_with_dest['dest_node'] >= 0)]
+    print(f"  Valid OD pairs (both in selected nodes): {len(valid_od):,}")
+    
+    # 시간별 OD 흐름 계산
+    od_flows = [[] for _ in range(len(unique_hours))]
+    
+    if len(valid_od) > 0:
+        # 시간별, OD pair별 그룹화하여 카운트
+        grouped = valid_od.groupby(['time_idx', 'origin_node', 'dest_node']).size().reset_index(name='cnt')
+        
+        print("  Computing OD flows by timestep...")
+        for _, row in tqdm(grouped.iterrows(), total=len(grouped), desc="  Processing OD pairs"):
+            time_idx = int(row['time_idx'])
+            u = int(row['origin_node'])
+            v = int(row['dest_node'])
+            cnt = int(row['cnt'])
+            
+            if pd.notna(time_idx) and 0 <= time_idx < len(unique_hours):
+                od_flows[time_idx].append({'u': u, 'v': v, 'cnt': cnt})
+    
+    # 통계 출력
+    total_od_records = sum(len(od_list) for od_list in od_flows)
+    total_od_count = sum(od['cnt'] for od_list in od_flows for od in od_list)
+    non_empty_timesteps = sum(1 for od_list in od_flows if len(od_list) > 0)
+    
+    print(f"\nOD flow statistics:")
+    print(f"  Timesteps with OD data: {non_empty_timesteps} / {len(unique_hours)}")
+    print(f"  Unique OD pairs (across all time): {total_od_records:,}")
+    print(f"  Total OD trips: {total_od_count:,}")
+    
+    return od_flows
 
 
 def create_temporal_features(unique_hours: list) -> list[dict]:
@@ -423,28 +545,29 @@ def create_temporal_features(unique_hours: list) -> list[dict]:
 
 
 def save_graph_json(output_path: Path, nodes: list[dict], demands: np.ndarray,
-                    temporal_features: list[dict]):
+                    temporal_features: list[dict], od_flows: list[list[dict]]):
     """
-    그래프 데이터를 새로운 JSON 형식으로 저장
+    그래프 데이터를 새로운 JSON 형식으로 저장 (OD 정보 포함)
     """
     print("\n" + "="*60)
     print("Saving graph to JSON")
     print("="*60)
     
-    # x 배열 생성: 각 timestep에 대한 demand + temporal features
+    # x 배열 생성: 각 timestep에 대한 demand + temporal features + OD
     x = []
     for t in range(len(demands)):
         x_t = {
             'demand': demands[t].tolist(),  # N개 노드의 수요
             'day': temporal_features[t]['day'],
             'time': temporal_features[t]['time'],
-            'holiday': temporal_features[t]['holiday']
+            'holiday': temporal_features[t]['holiday'],
+            'OD': od_flows[t]  # OD 흐름 정보
         }
         x.append(x_t)
     
     data = {
         'nodes': nodes,  # 통합된 노드 정보
-        'x': x  # 시계열 데이터 + temporal features
+        'x': x  # 시계열 데이터 + temporal features + OD
     }
     
     with open(output_path, 'w', encoding='utf-8') as f:
@@ -455,7 +578,7 @@ def save_graph_json(output_path: Path, nodes: list[dict], demands: np.ndarray,
     print(f"\nData structure:")
     print(f"  nodes: {len(nodes)} nodes")
     print(f"  x: {len(x)} timesteps")
-    print(f"    - Each timestep has: demand (list of {len(demands[0])}), day, time, holiday")
+    print(f"    - Each timestep has: demand (list of {len(demands[0])}), day, time, holiday, OD (list)")
 
 
 def main():
@@ -529,15 +652,26 @@ def main():
     # Step 7: 노드별 시계열 수요 추출
     demands = extract_node_demands(temporal_grid, patches, PATCH_SIZE)
     
-    # Step 8: Temporal features 생성 (day, time, holiday)
+    # Step 8: 좌표-노드 매핑 생성
+    print("\n" + "="*60)
+    print("Creating coordinate-to-node mapping")
+    print("="*60)
+    coord_to_node = create_coord_to_node_mapping(patches, PATCH_SIZE, bounds)
+    print(f"  Mapped grid cells: {len(coord_to_node):,}")
+    
+    # Step 9: OD 흐름 추출
+    od_flows = extract_od_flows(df, gdf, unique_hours, coord_to_node, bounds)
+    
+    # Step 10: Temporal features 생성 (day, time, holiday)
     temporal_features = create_temporal_features(unique_hours)
     
-    # Step 9: JSON 저장
+    # Step 11: JSON 저장
     save_graph_json(
         output_dir / 'graph_data.json',
         nodes=nodes,
         demands=demands,
-        temporal_features=temporal_features
+        temporal_features=temporal_features,
+        od_flows=od_flows
     )
     
     print("\n" + "╔" + "="*58 + "╗")

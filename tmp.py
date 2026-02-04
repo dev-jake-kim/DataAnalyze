@@ -10,6 +10,8 @@ try:
 except:
     gdf = gpd.read_file(file_path, encoding='cp949') # euc-kr이 안 되면 cp949 시도
 
+print(gdf.crs)
+
 # 3. 데이터 전처리: 암호 같은 코드를 '한글'로 변환
 # UQA1xx: 주거, UQA2xx: 상업, UQA3xx: 공업, UQA4xx: 녹지
 zoning_map = {
