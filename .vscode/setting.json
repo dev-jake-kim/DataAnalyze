@@ -1,5 +1,8 @@
 {
     "terminal.integrated.env.linux": {
         "PYTHONPATH": "${workspaceFolder}"
-    }
+    },
+    "python.analysis.extraPaths": [
+        "./control_origin_data"
+    ]
 }
