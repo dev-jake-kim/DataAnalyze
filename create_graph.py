@@ -7,12 +7,14 @@
 """
 from __future__ import annotations
 
+import re
 import sys
 import json
 import numpy as np
 import pandas as pd
 import geopandas as gpd
 from pathlib import Path
+from scipy.stats import f
 from tqdm import tqdm
 from shapely.geometry import Point
 import pulp
@@ -106,7 +108,7 @@ def load_and_preprocess_data(csv_path: Path) -> tuple[pd.DataFrame, gpd.GeoDataF
                              time_col='call_date', window_seconds=600)
     
     print("\n[4/4] Applying crop_filter...")
-    df = crop_filter(df, threshold_rate=0.85, step_rate=0.001)
+    df = crop_filter(df, threshold_rate=0.9, step_rate=0.001)
     
     print(f"\nFinal preprocessed data: {len(df):,} rows")
     
@@ -191,9 +193,12 @@ def create_temporal_grid(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
     return temporal_grid, unique_hours
 
 
-def get_patch(grid: np.ndarray, a: int, b: int, x: int) -> tuple[np.ndarray, int]:
+def get_patch(grid: np.ndarray, a: int, b: int, x: int,
+              bounds: tuple[float, float, float, float]) -> tuple[list[list[dict]], int]:
     """
-    최적 패치 선택 (grid.py의 get_patch 함수)
+    최적 패치 선택 및 구성 셀 정보 반환
+    Returns: (List[List[Dict]], total_score)
+    patches[i] = [{'x': grid_col, 'y': grid_row, 'lat': lat, 'lon': lon}, ...]
     """
     N, M = grid.shape
     
@@ -231,16 +236,64 @@ def get_patch(grid: np.ndarray, a: int, b: int, x: int) -> tuple[np.ndarray, int
     # 솔버 실행
     prob.solve(pulp.PULP_CBC_CMD(msg=0))
     
-    # 결과 추출
-    best_patches = []
+    # 결과 추출 - 사각형 좌상단 좌표
+    best_patches_tl = []
     for r in range(N-a+1):
         for c in range(M-b+1):
             if pulp.value(choices[r][c]) == 1:
-                best_patches.append((r, c))
+                best_patches_tl.append((r, c))
                 
     total_score = int(pulp.value(prob.objective))
     
-    return np.array(best_patches), total_score
+    # 각 패치를 구성하는 셀 정보 생성
+    print("  Generating patch cell details...")
+    patches = [[] for _ in range(len(best_patches_tl))]
+    
+    min_x, max_x, min_y, max_y = bounds
+    
+    # 1. 모든 패치의 모든 셀 좌표 수집
+    all_cells = [] # (row, col, patch_idx)
+    
+    for idx, (r_start, c_start) in enumerate(best_patches_tl):
+        for i in range(a):
+            for j in range(b):
+                r = r_start + i
+                c = c_start + j
+                if r < N and c < M:
+                    all_cells.append((r, c, idx))
+    
+    if not all_cells:
+         return [], total_score
+
+    # 2. 좌표 변환을 위한 일괄 처리
+    rows = np.array([item[0] for item in all_cells])
+    cols = np.array([item[1] for item in all_cells])
+    indices = [item[2] for item in all_cells]
+    
+    # Grid 중심 좌표 (EPSG:5174)
+    xs = min_x + (cols + 0.5) * GRID_SIZE
+    ys = max_y - (rows + 0.5) * GRID_SIZE
+    
+    # WGS84 변환
+    points_df = gpd.GeoDataFrame(
+        {'geometry': gpd.points_from_xy(xs, ys)},
+        crs=TARGET_CRS
+    ).to_crs('EPSG:4326')
+    
+    lons = points_df.geometry.x.values
+    lats = points_df.geometry.y.values
+    
+    # 3. 결과 구조화
+    for k, idx in enumerate(indices):
+        cell_info = {
+            'x': int(cols[k]),
+            'y': int(rows[k]),
+            'lat': float(lats[k]),
+            'lon': float(lons[k])
+        }
+        patches[idx].append(cell_info)
+    
+    return patches, total_score
 
 
 def map_landuse_to_grid(gdf: gpd.GeoDataFrame, grid_shape: tuple[int, int], 
@@ -251,6 +304,7 @@ def map_landuse_to_grid(gdf: gpd.GeoDataFrame, grid_shape: tuple[int, int],
     print("  Mapping land use to grid...")
     
     min_x, max_x, min_y, max_y = bounds
+    print(f"  Grid bounds: x({min_x}, {max_x}), y({min_y}, {max_y})")
     n_rows, n_cols = grid_shape
     
     landuse_grid = np.zeros((n_rows, n_cols), dtype=np.int8)
@@ -260,6 +314,7 @@ def map_landuse_to_grid(gdf: gpd.GeoDataFrame, grid_shape: tuple[int, int],
             try:
                 return int(atrb[3])
             except (ValueError, IndexError):
+                print(f"Warning: Unexpected ATRB_SE format: {atrb}")
                 return 0
         return 0
     
@@ -285,10 +340,10 @@ def map_landuse_to_grid(gdf: gpd.GeoDataFrame, grid_shape: tuple[int, int],
     return landuse_grid
 
 
-def compute_node_composition(landuse_grid: np.ndarray, patches: np.ndarray, 
-                             patch_size: int) -> list[dict]:
+def compute_node_composition(landuse_grid: np.ndarray, patches: list[list[dict]]) -> list[dict]:
     """
     각 노드(패치)의 토지 이용 구성 계산
+    patches: List[List[{'x': col, 'y': row, ...}]]
     """
     print("\n" + "="*60)
     print("Computing node land use composition")
@@ -296,8 +351,18 @@ def compute_node_composition(landuse_grid: np.ndarray, patches: np.ndarray,
     
     node_compositions = []
     
-    for idx, (r, c) in enumerate(tqdm(patches, desc="Computing compositions")):
-        patch_landuse = landuse_grid[r:r+patch_size, c:c+patch_size]
+    for idx, patch_cells in enumerate(tqdm(patches, desc="Computing compositions")):
+        # 패치를 구성하는 모든 셀의 값 가져오기
+        patch_values = []
+        for cell in patch_cells:
+            # cell['y'] is row, cell['x'] is col
+            try:
+                val = landuse_grid[cell['y'], cell['x']]
+                patch_values.append(val)
+            except IndexError:
+                continue
+                
+        patch_landuse = np.array(patch_values)
         
         # 각 카테고리별 셀 개수 (비율로 변환하지 않고 개수 유지)
         composition = {}
@@ -317,64 +382,57 @@ def compute_node_composition(landuse_grid: np.ndarray, patches: np.ndarray,
     return node_compositions
 
 
-def create_integrated_nodes(patches: np.ndarray, patch_size: int, bounds: tuple,
+def create_integrated_nodes(patches: list[list[dict]], 
                            grid_size: int, node_compositions: list[dict]) -> list[dict]:
     """
     노드 정보 통합: node_id, lat, lon, composition
+    lat, lon은 패치 구성 셀들의 평균 좌표 사용
     """
     print("\n" + "="*60)
     print("Creating integrated node information")
     print("="*60)
     
-    min_x, max_x, min_y, max_y = bounds
     nodes = []
     
-    for idx, (r, c) in enumerate(tqdm(patches, desc="Creating nodes")):
-        # 패치 중심 좌표 (미터)
-        center_x = min_x + (c + patch_size / 2) * grid_size
-        center_y = max_y - (r + patch_size / 2) * grid_size
+    for idx, patch_cells in enumerate(tqdm(patches, desc="Creating nodes")):
+        if not patch_cells:
+            continue
+            
+        # 중심 좌표 계산 (평균)
+        lats = [c['lat'] for c in patch_cells]
+        lons = [c['lon'] for c in patch_cells]
         
-        # 위도/경도로 변환
-        point = gpd.GeoDataFrame(
-            {'geometry': [Point(center_x, center_y)]},
-            crs=TARGET_CRS
-        )
-        point_wgs84 = point.to_crs('EPSG:4326')
-        
-        lon = point_wgs84.geometry.x.values[0]
-        lat = point_wgs84.geometry.y.values[0]
+        avg_lat = sum(lats) / len(lats)
+        avg_lon = sum(lons) / len(lons)
         
         # 통합 노드 정보
         nodes.append({
             'node_id': idx,
-            'lat': float(lat),
-            'lon': float(lon),
+            'lat': float(avg_lat),
+            'lon': float(avg_lon),
             'composition': node_compositions[idx],
-            'size': (patch_size)**2 * (grid_size/1000)**2  # km² 단위
+            # Size: 셀 개수 * 단위 면적
+            'size': len(patch_cells) * (grid_size/1000)**2  # km² 단위
         })
     
     return nodes
 
 
-def create_coord_to_node_mapping(patches: np.ndarray, patch_size: int,
-                                 bounds: tuple[float, float, float, float]) -> dict:
+def create_coord_to_node_mapping(patches: list[list[dict]]) -> dict:
     """
     좌표(grid row, col)를 노드 인덱스로 매핑하는 딕셔너리 생성
     Returns: {(row, col): node_idx}
     """
     coord_to_node = {}
     
-    for node_idx, (r, c) in enumerate(patches):
-        # 패치가 커버하는 모든 grid cell
-        for dr in range(patch_size):
-            for dc in range(patch_size):
-                coord_to_node[(r + dr, c + dc)] = node_idx
+    for node_idx, patch_cells in enumerate(patches):
+        for cell in patch_cells:
+            coord_to_node[(cell['y'], cell['x'])] = node_idx
     
     return coord_to_node
 
 
-def extract_node_demands(temporal_grid: np.ndarray, patches: np.ndarray,
-                        patch_size: int) -> np.ndarray:
+def extract_node_demands(temporal_grid: np.ndarray, patches: list[list[dict]]) -> np.ndarray:
     """
     각 노드(패치)의 시계열 수요 추출
     Returns: (T, N) 배열
@@ -388,9 +446,16 @@ def extract_node_demands(temporal_grid: np.ndarray, patches: np.ndarray,
     
     demands = np.zeros((n_timesteps, n_nodes), dtype=np.int32)
     
-    for idx, (r, c) in enumerate(tqdm(patches, desc="Extracting demands")):
+    for idx, patch_cells in enumerate(tqdm(patches, desc="Extracting demands")):
+        if not patch_cells:
+            continue
+            
+        rows = [c['y'] for c in patch_cells]
+        cols = [c['x'] for c in patch_cells]
+        
         # 각 시간 스텝에서 패치 영역의 수요 합계
-        demands[:, idx] = temporal_grid[:, r:r+patch_size, c:c+patch_size].sum(axis=(1, 2))
+        # temporal_grid[:, rows, cols] -> (T, N_cells)
+        demands[:, idx] = temporal_grid[:, rows, cols].sum(axis=1)
     
     print(f"\nDemand extraction complete:")
     print(f"  Shape: {demands.shape} (T={n_timesteps}, N={n_nodes})")
@@ -426,7 +491,7 @@ def extract_od_flows(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
         return [[] for _ in range(len(unique_hours))]
     
     # 시간 인덱스 추가
-    df_with_dest['hour'] = df_with_dest['call_date'].dt.floor('H')
+    df_with_dest['hour'] = df_with_dest['call_date'].dt.floor('h')
     hour_to_idx = {hour: idx for idx, hour in enumerate(unique_hours)}
     df_with_dest['time_idx'] = df_with_dest['hour'].map(hour_to_idx)
     
@@ -570,9 +635,15 @@ def save_graph_json(output_path: Path, nodes: list[dict], demands: np.ndarray,
         'x': x  # 시계열 데이터 + temporal features + OD
     }
     
-    with open(output_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    json_str = json.dumps(data, indent=2, ensure_ascii=False, separators=(',', ': '))
     
+    def compact_list(match):
+        return match.group(0).replace('\n', '').replace(' ', '')
+    
+    compact_json = re.sub(r'\[[\s\d,]+\]', compact_list, json_str)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        f.write(compact_json)
     print(f"\nJSON saved to: {output_path}")
     print(f"  File size: {output_path.stat().st_size / 1024:.2f} KB")
     print(f"\nData structure:")
@@ -594,7 +665,7 @@ def main():
     print("╚" + "="*58 + "╝\n")
     
     # Step 1: 데이터 전처리
-    df, gdf = load_and_preprocess_data(origin_csv)
+    df, gdf = load_and_preprocess_data(origin_csv) #df: demand정보의 dataframe, gdf: demand정보의 geodataframe
     
     # 좌표 범위 계산
     x_coords = gdf.geometry.x.values
@@ -602,7 +673,7 @@ def main():
     bounds = (x_coords.min(), x_coords.max(), y_coords.min(), y_coords.max())
     
     # Step 2: 시계열 demand grid 생성
-    temporal_grid, unique_hours = create_temporal_grid(df, gdf, bounds)
+    temporal_grid, unique_hours = create_temporal_grid(df, gdf, bounds) # temporal_grid: (T,H,W)크기의 numpy ndarray, unique_hours: 시간 스텝 리스트
     
     # Step 3: 총 수요 grid (시간 합산)
     sum_grid = temporal_grid.sum(axis=0)
@@ -612,11 +683,17 @@ def main():
     print("Selecting optimal patches")
     print("="*60)
     
-    patches, total_score = get_patch(sum_grid, PATCH_SIZE, PATCH_SIZE, N_PATCHES)
-    coverage = (PATCH_SIZE * PATCH_SIZE * N_PATCHES) / (sum_grid.shape[0] * sum_grid.shape[1])
+    # 수정됨: bounds 전달, 반환값은 (List[List[Dict]], score)
+    patches, total_score = get_patch(sum_grid, PATCH_SIZE, PATCH_SIZE, N_PATCHES, bounds)
+    print(f'patches sample: {patches[0][:3] if patches and patches[0] else "No patches"}')
+    
+    # 패치 구성 셀 개수로 커버리지 계산
+    total_cells = sum(len(p) for p in patches)
+    coverage = total_cells / (sum_grid.shape[0] * sum_grid.shape[1])
     
     print(f"\nPatch selection results:")
     print(f"  Selected patches: {len(patches)}")
+    print(f"  Total cells in patches: {total_cells}")
     print(f"  Coverage: {coverage*100:.2f}%")
     print(f"  Total score: {total_score:,} / {sum_grid.sum():,} ({total_score/sum_grid.sum()*100:.2f}%)")
     
@@ -625,38 +702,36 @@ def main():
     
     # landuse_grid가 없으면 생성
     landuse_grid_path = output_dir / 'landuse_grid.npy'
-    if landuse_grid_path.exists():
-        landuse_grid = np.load(landuse_grid_path)
-        print(f"  Loaded existing landuse_grid from {landuse_grid_path}")
-    else:
-        print(f"  Creating new landuse_grid...")
-        # Shapefile 로드
-        gdf_shp = gpd.read_file(shp_file)
-        if gdf_shp.crs != TARGET_CRS:
-            gdf_shp = gdf_shp.to_crs(TARGET_CRS)
-        
-        # Land use grid 생성
-        landuse_grid = map_landuse_to_grid(
-            gdf_shp, 
-            sum_grid.shape, 
-            bounds
-        )
-        np.save(landuse_grid_path, landuse_grid)
-        print(f"  Saved landuse_grid to {landuse_grid_path}")
+   
+    print(f"  Creating landuse_grid...")
+    # Shapefile 로드
+    gdf_shp = gpd.read_file(shp_file)
+    if gdf_shp.crs != TARGET_CRS:
+        gdf_shp = gdf_shp.to_crs(TARGET_CRS)
     
-    node_compositions = compute_node_composition(landuse_grid, patches, PATCH_SIZE)
+    # Land use grid 생성
+    landuse_grid = map_landuse_to_grid(
+        gdf_shp, 
+        sum_grid.shape, 
+        bounds
+    )
+    print(f'  landuse_grid shape: {landuse_grid.shape}')
+    np.save(landuse_grid_path, landuse_grid)
+    print(f"  Saved landuse_grid to {landuse_grid_path}")
+
+    node_compositions = compute_node_composition(landuse_grid, patches)
     
     # Step 6: 노드 정보 통합 (node_id, lat, lon, composition)
-    nodes = create_integrated_nodes(patches, PATCH_SIZE, bounds, GRID_SIZE, node_compositions)
+    nodes = create_integrated_nodes(patches, GRID_SIZE, node_compositions)
     
     # Step 7: 노드별 시계열 수요 추출
-    demands = extract_node_demands(temporal_grid, patches, PATCH_SIZE)
+    demands = extract_node_demands(temporal_grid, patches) # demands: 노드별 시계열 수요 리스트
     
     # Step 8: 좌표-노드 매핑 생성
     print("\n" + "="*60)
     print("Creating coordinate-to-node mapping")
     print("="*60)
-    coord_to_node = create_coord_to_node_mapping(patches, PATCH_SIZE, bounds)
+    coord_to_node = create_coord_to_node_mapping(patches)
     print(f"  Mapped grid cells: {len(coord_to_node):,}")
     
     # Step 9: OD 흐름 추출
