@@ -10,6 +10,8 @@ from __future__ import annotations
 import re
 import sys
 import json
+import re
+from collections import defaultdict, Counter
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -127,7 +129,7 @@ def load_and_preprocess_data(csv_path: Path) -> tuple[pd.DataFrame, gpd.GeoDataF
     # dest 컬럼이 있는지 확인하고 유지
     if 'dest_xpos' in df.columns and 'dest_ypos' in df.columns:
         print(f"  Destination columns preserved")
-    
+    #df.to_csv(csv_path.parent / 'preprocessed_data.csv', index=False, encoding='cp949')
     return df, gdf
 
 
@@ -340,44 +342,77 @@ def map_landuse_to_grid(gdf: gpd.GeoDataFrame, grid_shape: tuple[int, int],
     return landuse_grid
 
 
-def compute_node_composition(landuse_grid: np.ndarray, patches: list[list[dict]]) -> list[dict]:
+def compute_node_composition(landuse_grid: np.ndarray, patches: list[list[dict]],
+                             poi_gdf: gpd.GeoDataFrame = None,
+                             bounds: tuple[float, float, float, float] = None) -> list[dict]:
     """
-    각 노드(패치)의 토지 이용 구성 계산
+    각 노드(패치)의 토지 이용 구성 및 POI 계산
     patches: List[List[{'x': col, 'y': row, ...}]]
+    poi_gdf: POI 정보를 담은 GeoDataFrame (옵션)
+    bounds: 그리드 범위 (min_x, max_x, min_y, max_y) (POI 계산 시 필수)
     """
     print("\n" + "="*60)
-    print("Computing node land use composition")
+    print("Computing node composition (Land Use + POI)")
     print("="*60)
     
-    node_compositions = []
+    # POI 매핑 준비
+    poi_grid_map = defaultdict(list)
+    if poi_gdf is not None and bounds is not None:
+        print("  Mapping POIs to grid...")
+        min_x, max_x, min_y, max_y = bounds
+        
+        # 좌표 추출
+        poi_x = poi_gdf.geometry.x.values
+        poi_y = poi_gdf.geometry.y.values
+        categories = poi_gdf['개방서비스명'].values
+        
+        # Grid 좌표 계산
+        poi_cols = ((poi_x - min_x) / GRID_SIZE).astype(int)
+        poi_rows = ((max_y - poi_y) / GRID_SIZE).astype(int)
+        
+        # 유효 범위 필터링
+        n_rows, n_cols = landuse_grid.shape
+        valid_mask = (poi_rows >= 0) & (poi_rows < n_rows) & \
+                     (poi_cols >= 0) & (poi_cols < n_cols)
+        
+        valid_rows = poi_rows[valid_mask]
+        valid_cols = poi_cols[valid_mask]
+        valid_cats = categories[valid_mask]
+        
+        for r, c, cat in zip(valid_rows, valid_cols, valid_cats):
+            poi_grid_map[(r, c)].append(cat)
+            
+        print(f"  Mapped {len(valid_rows):,} POIs to grid")
     
+    node_compositions = []
     for idx, patch_cells in enumerate(tqdm(patches, desc="Computing compositions")):
         # 패치를 구성하는 모든 셀의 값 가져오기
-        patch_values = []
+        composition = Counter()
+        poi = Counter()
+        
         for cell in patch_cells:
-            # cell['y'] is row, cell['x'] is col
+            r, c = cell['y'], cell['x']
+            
+            # 1. Land Use Counting
             try:
-                val = landuse_grid[cell['y'], cell['x']]
-                patch_values.append(val)
+                val = landuse_grid[r, c]
+                if val > 0:
+                    composition[f'UQA{val}'] += 1
+                elif val == 0:
+                    composition['Unclassified'] += 1
             except IndexError:
-                continue
-                
-        patch_landuse = np.array(patch_values)
+                pass
+            
+            # 2. POI Counting
+            if (r, c) in poi_grid_map:
+                for cat in poi_grid_map[(r, c)]:
+                    if pd.notna(cat):
+                        poi[cat] += 1
         
-        # 각 카테고리별 셀 개수 (비율로 변환하지 않고 개수 유지)
-        composition = {}
-        
-        for category in range(1, 6):
-            count = np.sum(patch_landuse == category)
-            if count > 0:
-                composition[f'UQA{category}'] = int(count)
-        
-        # 미분류
-        unclassified = np.sum(patch_landuse == 0)
-        if unclassified > 0:
-            composition['Unclassified'] = int(unclassified)
-        
-        node_compositions.append(composition)
+        node_compositions.append({
+            'land_use': dict(composition),
+            'poi': dict(poi)
+        })
     
     return node_compositions
 
@@ -675,6 +710,7 @@ def main():
     # Step 2: 시계열 demand grid 생성
     temporal_grid, unique_hours = create_temporal_grid(df, gdf, bounds) # temporal_grid: (T,H,W)크기의 numpy ndarray, unique_hours: 시간 스텝 리스트
     
+    
     # Step 3: 총 수요 grid (시간 합산)
     sum_grid = temporal_grid.sum(axis=0)
     
@@ -719,7 +755,18 @@ def main():
     np.save(landuse_grid_path, landuse_grid)
     print(f"  Saved landuse_grid to {landuse_grid_path}")
 
-    node_compositions = compute_node_composition(landuse_grid, patches)
+    # POI 데이터 로드 (Main에 추가)
+    print("\nLoading POI data...")
+    poi_df = pd.read_csv(data_dir / 'poi_data.csv', encoding='utf-8')
+    poi_df = poi_df.dropna(subset=['좌표정보x(epsg5174)', '좌표정보y(epsg5174)'])
+    poi_gdf = gpd.GeoDataFrame(
+        poi_df, 
+        geometry=gpd.points_from_xy(poi_df['좌표정보x(epsg5174)'], poi_df['좌표정보y(epsg5174)']), 
+        crs="EPSG:5174"
+    )
+    print(f"  Loaded {len(poi_gdf):,} POIs")
+
+    node_compositions = compute_node_composition(landuse_grid, patches, poi_gdf, bounds)
     
     # Step 6: 노드 정보 통합 (node_id, lat, lon, composition)
     nodes = create_integrated_nodes(patches, GRID_SIZE, node_compositions)
