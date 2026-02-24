@@ -17,7 +17,6 @@ import pandas as pd
 import geopandas as gpd
 from pathlib import Path
 from scipy.stats import f
-from shapely import bounds
 from tqdm import tqdm
 from shapely.geometry import Point
 import pulp
@@ -30,14 +29,12 @@ from extract_frame import remove_other_region, eleminate_duplicates, crop_filter
 US_RANGE_X = (128_950739, 129_500739)
 US_RANGE_Y = (35_756099, 35_305729)
 
-GRID_SIZE = 950  # 100m
+GRID_SIZE = 100  # 100m
 TARGET_CRS = 'EPSG:5174'
 
 # 패치 설정
 N_PATCHES = 50  # 선택할 패치 개수
 PATCH_SIZE = 7  # 7x7 그리드 (700m x 700m)
-
-CELLS_PER_PATCH = 1  # 패치당 셀 개수 (get_patch_cell용)
 
 # 한국 공휴일 설정 (2024-2025)
 # 형식: 'YYYY-MM-DD'
@@ -157,7 +154,7 @@ def create_temporal_grid(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
     
     # 시간 범위 확인
     df_with_time = df.copy()
-    df_with_time['hour'] = df_with_time['call_date'].dt.floor('h')
+    df_with_time['hour'] = df_with_time['call_date'].dt.floor('H')
     
     unique_hours = sorted(df_with_time['hour'].unique())
     n_timesteps = len(unique_hours)
@@ -443,15 +440,12 @@ def create_integrated_nodes(patches: list[list[dict]],
         avg_lat = sum(lats) / len(lats)
         avg_lon = sum(lons) / len(lons)
         
-        cell_coords = [[c['y'], c['x']] for c in patch_cells]
-        
         # 통합 노드 정보
         nodes.append({
             'node_id': idx,
             'lat': float(avg_lat),
             'lon': float(avg_lon),
             'composition': node_compositions[idx],
-            'cells': cell_coords,
             # Size: 셀 개수 * 단위 면적
             'size': len(patch_cells) * (grid_size/1000)**2  # km² 단위
         })
@@ -605,106 +599,6 @@ def extract_od_flows(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
     
     return od_flows
 
-def get_patch_cell(grid: np.ndarray, n_patches: int, n_cells_per_patch: int,
-                             bounds: tuple[float, float, float, float]) -> tuple[list[list[dict]], int]:
-    """
-    영역 확장(Region Growing) 방식의 패치 생성
-    1. 방문하지 않은 가장 높은 수요의 셀을 시드(Seed)로 선정
-    2. 해당 패치에 인접한 셀 중 가장 수요가 높은 셀을 추가 (반복)
-    3. 지정된 n_cells_per_patch에 도달하면 다음 패치 생성
-    """
-    print("\n" + "="*60)
-    print(f"Generating patches using Region Growing (Size: {n_cells_per_patch} cells)")
-    print("="*60)
-
-    N, M = grid.shape
-    visited = np.zeros_like(grid, dtype=bool)
-    patches = []
-    total_score = 0
-    
-    min_x, max_x, min_y, max_y = bounds
-
-    # 4방향 탐색 (상, 하, 좌, 우) - 대각선 포함시 방향 추가 필요
-    directions = [(-1, 0), (1, 0), (0, -1), (0, 1)]
-
-    for i in tqdm(range(n_patches), desc="Growing regions"):
-        # 1. 시드 찾기: 방문하지 않은 곳 중 수요가 가장 높은 곳 (Greedy)
-        # 마스킹된 그리드 생성
-        masked_grid = np.where(visited, -1, grid)
-        if masked_grid.max() == -1: # 더 이상 가용한 셀이 없음
-            break
-            
-        seed_flat_idx = np.argmax(masked_grid)
-        seed_r, seed_c = divmod(seed_flat_idx, M)
-        
-        current_patch_indices = [(seed_r, seed_c)]
-        visited[seed_r, seed_c] = True
-        current_patch_score = grid[seed_r, seed_c]
-        
-        # 2. 영역 확장
-        # 인접 후보군 관리 (좌표 중복 방지 위해 set 사용)
-        candidates = set()
-        
-        def add_neighbors(r, c):
-            for dr, dc in directions:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < N and 0 <= nc < M and not visited[nr, nc]:
-                    candidates.add((nr, nc))
-
-        add_neighbors(seed_r, seed_c)
-
-        while len(current_patch_indices) < n_cells_per_patch and candidates:
-            # 후보군 중 가장 수요가 높은 셀 선택
-            best_candidate = None
-            max_val = -1
-            
-            for r, c in candidates:
-                if grid[r, c] > max_val:
-                    max_val = grid[r, c]
-                    best_candidate = (r, c)
-            
-            if best_candidate is None: # 후보가 더 이상 없을 경우 (고립된 지역)
-                break
-                
-            # 선택된 셀을 패치에 추가
-            br, bc = best_candidate
-            visited[br, bc] = True # 방문 처리
-            current_patch_indices.append((br, bc))
-            current_patch_score += max_val
-            
-            # 후보군 업데이트 (선택된 노드는 제거, 그 노드의 이웃 추가)
-            candidates.remove(best_candidate)
-            add_neighbors(br, bc)
-            
-            # 이미 방문한 노드가 candidates에 다시 들어가지 않도록 필터링 (add_neighbors에서 처리됨)
-            # 하지만 candidates 내에 있던 다른 노드가 이번 루프에서 visited가 될 일은 없으므로 안전
-
-        total_score += current_patch_score
-
-        # 3. 좌표 변환 및 결과 포맷팅 (기존 로직과 호환성 유지)
-        patch_cells = []
-        for r, c in current_patch_indices:
-            # Grid 중심 좌표 (EPSG:5174)
-            cx = min_x + (c + 0.5) * GRID_SIZE
-            cy = max_y - (r + 0.5) * GRID_SIZE
-            
-            # 좌표 변환을 위해 임시 GeoDataFrame 사용 (성능 최적화를 위해 루프 밖에서 일괄 처리도 가능하나 가독성 유지)
-            # 여기서는 간단히 단일 점 변환 로직 사용 (성능 민감시 기존 코드처럼 일괄 변환 권장)
-            pt_df = gpd.GeoDataFrame({'geometry': [Point(cx, cy)]}, crs=TARGET_CRS).to_crs('EPSG:4326')
-            lon = pt_df.geometry.x.iloc[0]
-            lat = pt_df.geometry.y.iloc[0]
-            
-            patch_cells.append({
-                'x': int(c), # col
-                'y': int(r), # row
-                'lat': float(lat),
-                'lon': float(lon)
-            })
-        
-        patches.append(patch_cells)
-
-    return patches, total_score
-
 
 def create_temporal_features(unique_hours: list) -> list[dict]:
     """
@@ -816,7 +710,6 @@ def main():
     # Step 2: 시계열 demand grid 생성
     temporal_grid, unique_hours = create_temporal_grid(df, gdf, bounds) # temporal_grid: (T,H,W)크기의 numpy ndarray, unique_hours: 시간 스텝 리스트
     
-    np.save(output_dir / 'temporal_grid.npy', temporal_grid)
     
     # Step 3: 총 수요 grid (시간 합산)
     sum_grid = temporal_grid.sum(axis=0)
@@ -827,10 +720,7 @@ def main():
     print("="*60)
     
     # 수정됨: bounds 전달, 반환값은 (List[List[Dict]], score)
-    # 만약에 기존 방식을 사용할 것이면 아래 주석 해제
-    # patches, total_score = get_patch(sum_grid, PATCH_SIZE, PATCH_SIZE, N_PATCHES, bounds)
-    # 영역 확장 방식 사용
-    patches, total_score = get_patch_cell(sum_grid, N_PATCHES, CELLS_PER_PATCH, bounds)
+    patches, total_score = get_patch(sum_grid, PATCH_SIZE, PATCH_SIZE, N_PATCHES, bounds)
     print(f'patches sample: {patches[0][:3] if patches and patches[0] else "No patches"}')
     
     # 패치 구성 셀 개수로 커버리지 계산
