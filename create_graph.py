@@ -236,9 +236,7 @@ def get_patch(grid: np.ndarray, a: int, b: int, x: int,
                 prob += pulp.lpSum(applicable_patches) <= 1
 
     # 솔버 실행
-    prob.solve(pulp.PULP_CBC_CMD(msg=0))
-    
-    # 결과 추출 - 사각형 좌상단 좌표
+    prob.solve(pulp.COIN_CMD(msg=0, path="/opt/homebrew/opt/cbc/bin/cbc"))    # 결과 추출 - 사각형 좌상단 좌표
     best_patches_tl = []
     for r in range(N-a+1):
         for c in range(M-b+1):
@@ -691,6 +689,8 @@ def main():
     base_dir = Path(__file__).parent
     data_dir = base_dir / 'data'
     output_dir = base_dir / 'output'
+    if not output_dir.exists():
+        output_dir.mkdir()
     
     origin_csv = data_dir / 'origin_data.csv'
     shp_file = data_dir / 'UPIS_C_UQ111.shp'
