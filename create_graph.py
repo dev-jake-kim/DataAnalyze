@@ -35,6 +35,7 @@ TARGET_CRS = 'EPSG:5174'
 # 패치 설정
 N_PATCHES = 50  # 선택할 패치 개수
 PATCH_SIZE = 7  # 7x7 그리드 (700m x 700m)
+PADDING_SIZE = 2  # 노드 주변 near cell padding 크기
 
 # 한국 공휴일 설정 (2024-2025)
 # 형식: 'YYYY-MM-DD'
@@ -110,7 +111,7 @@ def load_and_preprocess_data(csv_path: Path) -> tuple[pd.DataFrame, gpd.GeoDataF
                              time_col='call_date', window_seconds=600)
     
     print("\n[4/4] Applying crop_filter...")
-    df = crop_filter(df, threshold_rate=0.9, step_rate=0.001)
+    df = crop_filter(df, threshold_rate=0.95, step_rate=0.001)
     
     print(f"\nFinal preprocessed data: {len(df):,} rows")
     
@@ -196,11 +197,13 @@ def create_temporal_grid(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
 
 
 def get_patch(grid: np.ndarray, a: int, b: int, x: int,
-              bounds: tuple[float, float, float, float]) -> tuple[list[list[dict]], int]:
+              bounds: tuple[float, float, float, float],
+              padding_size: int = 0) -> tuple[list[list[dict]], list[list[dict]], int]:
     """
-    최적 패치 선택 및 구성 셀 정보 반환
-    Returns: (List[List[Dict]], total_score)
+    최적 패치 선택 및 구성 셀/주변 셀 정보 반환
+    Returns: (patches, near_patches, total_score)
     patches[i] = [{'x': grid_col, 'y': grid_row, 'lat': lat, 'lon': lon}, ...]
+    near_patches[i] = padding 영역에서 inner patch를 제외한 셀 리스트
     """
     N, M = grid.shape
     
@@ -245,30 +248,46 @@ def get_patch(grid: np.ndarray, a: int, b: int, x: int,
                 
     total_score = int(pulp.value(prob.objective))
     
-    # 각 패치를 구성하는 셀 정보 생성
-    print("  Generating patch cell details...")
+    # 각 패치와 주변 셀 정보 생성
+    print("  Generating patch and near-cell details...")
     patches = [[] for _ in range(len(best_patches_tl))]
+    near_patches = [[] for _ in range(len(best_patches_tl))]
     
     min_x, max_x, min_y, max_y = bounds
     
-    # 1. 모든 패치의 모든 셀 좌표 수집
-    all_cells = [] # (row, col, patch_idx)
+    # 1. 모든 패치 셀과 near 셀 좌표 수집
+    all_cells = []  # (row, col, patch_idx, is_near)
     
     for idx, (r_start, c_start) in enumerate(best_patches_tl):
-        for i in range(a):
-            for j in range(b):
-                r = r_start + i
-                c = c_start + j
-                if r < N and c < M:
-                    all_cells.append((r, c, idx))
+        inner_r0, inner_c0 = r_start, c_start
+        inner_r1, inner_c1 = r_start + a, c_start + b
+        
+        # inner patch cells
+        for r in range(inner_r0, min(inner_r1, N)):
+            for c in range(inner_c0, min(inner_c1, M)):
+                all_cells.append((r, c, idx, False))
+        
+        # near cells (padding 영역 - inner patch)
+        if padding_size > 0:
+            outer_r0 = max(0, inner_r0 - padding_size)
+            outer_r1 = min(N, inner_r1 + padding_size)
+            outer_c0 = max(0, inner_c0 - padding_size)
+            outer_c1 = min(M, inner_c1 + padding_size)
+            
+            for r in range(outer_r0, outer_r1):
+                for c in range(outer_c0, outer_c1):
+                    if inner_r0 <= r < inner_r1 and inner_c0 <= c < inner_c1:
+                        continue
+                    all_cells.append((r, c, idx, True))
     
     if not all_cells:
-         return [], total_score
+         return [], [], total_score
 
     # 2. 좌표 변환을 위한 일괄 처리
     rows = np.array([item[0] for item in all_cells])
     cols = np.array([item[1] for item in all_cells])
     indices = [item[2] for item in all_cells]
+    near_flags = [item[3] for item in all_cells]
     
     # Grid 중심 좌표 (EPSG:5174)
     xs = min_x + (cols + 0.5) * GRID_SIZE
@@ -291,9 +310,12 @@ def get_patch(grid: np.ndarray, a: int, b: int, x: int,
             'lat': float(lats[k]),
             'lon': float(lons[k])
         }
-        patches[idx].append(cell_info)
+        if near_flags[k]:
+            near_patches[idx].append(cell_info)
+        else:
+            patches[idx].append(cell_info)
     
-    return patches, total_score
+    return patches, near_patches, total_score
 
 
 def map_landuse_to_grid(gdf: gpd.GeoDataFrame, grid_shape: tuple[int, int], 
@@ -362,7 +384,7 @@ def compute_node_composition(landuse_grid: np.ndarray, patches: list[list[dict]]
         # 좌표 추출
         poi_x = poi_gdf.geometry.x.values
         poi_y = poi_gdf.geometry.y.values
-        categories = poi_gdf['개방서비스명'].values
+        categories = poi_gdf['개방서비스아이디'].values
         
         # Grid 좌표 계산
         poi_cols = ((poi_x - min_x) / GRID_SIZE).astype(int)
@@ -415,7 +437,7 @@ def compute_node_composition(landuse_grid: np.ndarray, patches: list[list[dict]]
     return node_compositions
 
 
-def create_integrated_nodes(patches: list[list[dict]], 
+def create_integrated_nodes(patches: list[list[dict]], near_patches: list[list[dict]],
                            grid_size: int, node_compositions: list[dict]) -> list[dict]:
     """
     노드 정보 통합: node_id, lat, lon, composition
@@ -444,6 +466,8 @@ def create_integrated_nodes(patches: list[list[dict]],
             'lat': float(avg_lat),
             'lon': float(avg_lon),
             'composition': node_compositions[idx],
+            'cells': patch_cells,
+            'near_cells': near_patches[idx] if idx < len(near_patches) else [],
             # Size: 셀 개수 * 단위 면적
             'size': len(patch_cells) * (grid_size/1000)**2  # km² 단위
         })
@@ -643,7 +667,8 @@ def create_temporal_features(unique_hours: list) -> list[dict]:
 
 
 def save_graph_json(output_path: Path, nodes: list[dict], demands: np.ndarray,
-                    temporal_features: list[dict], od_flows: list[list[dict]]):
+                    near_demands: np.ndarray, temporal_features: list[dict],
+                    od_flows: list[list[dict]]):
     """
     그래프 데이터를 새로운 JSON 형식으로 저장 (OD 정보 포함)
     """
@@ -656,6 +681,7 @@ def save_graph_json(output_path: Path, nodes: list[dict], demands: np.ndarray,
     for t in range(len(demands)):
         x_t = {
             'demand': demands[t].tolist(),  # N개 노드의 수요
+            'near_demands': near_demands[t].tolist(),  # N개 노드의 주변 셀 수요
             'day': temporal_features[t]['day'],
             'time': temporal_features[t]['time'],
             'holiday': temporal_features[t]['holiday'],
@@ -682,7 +708,7 @@ def save_graph_json(output_path: Path, nodes: list[dict], demands: np.ndarray,
     print(f"\nData structure:")
     print(f"  nodes: {len(nodes)} nodes")
     print(f"  x: {len(x)} timesteps")
-    print(f"    - Each timestep has: demand (list of {len(demands[0])}), day, time, holiday, OD (list)")
+    print(f"    - Each timestep has: demand (list of {len(demands[0])}), near_demands, day, time, holiday, OD (list)")
 
 
 def main():
@@ -719,9 +745,18 @@ def main():
     print("Selecting optimal patches")
     print("="*60)
     
-    # 수정됨: bounds 전달, 반환값은 (List[List[Dict]], score)
-    patches, total_score = get_patch(sum_grid, PATCH_SIZE, PATCH_SIZE, N_PATCHES, bounds)
+    # 수정됨: bounds + padding 전달, 반환값은 (patches, near_patches, score)
+    patches, near_patches, total_score = get_patch(
+        sum_grid,
+        PATCH_SIZE,
+        PATCH_SIZE,
+        N_PATCHES,
+        bounds,
+        padding_size=PADDING_SIZE
+    )
     print(f'patches sample: {patches[0][:3] if patches and patches[0] else "No patches"}')
+    print(f'near_patches sample: {near_patches[0][:3] if near_patches and near_patches[0] else "No near cells"}')
+    print(f'len near_patches: {len(near_patches)}, len(near_patches[0]): {len(near_patches[0]) if near_patches else "N/A"}')
     
     # 패치 구성 셀 개수로 커버리지 계산
     total_cells = sum(len(p) for p in patches)
@@ -769,10 +804,11 @@ def main():
     node_compositions = compute_node_composition(landuse_grid, patches, poi_gdf, bounds)
     
     # Step 6: 노드 정보 통합 (node_id, lat, lon, composition)
-    nodes = create_integrated_nodes(patches, GRID_SIZE, node_compositions)
+    nodes = create_integrated_nodes(patches, near_patches, GRID_SIZE, node_compositions)
     
     # Step 7: 노드별 시계열 수요 추출
     demands = extract_node_demands(temporal_grid, patches) # demands: 노드별 시계열 수요 리스트
+    near_demands = extract_node_demands(temporal_grid, near_patches)  # near_demands: 주변 셀 시계열 수요 리스트
     
     # Step 8: 좌표-노드 매핑 생성
     print("\n" + "="*60)
@@ -792,6 +828,7 @@ def main():
         output_dir / 'graph_data.json',
         nodes=nodes,
         demands=demands,
+        near_demands=near_demands,
         temporal_features=temporal_features,
         od_flows=od_flows
     )
