@@ -20,6 +20,9 @@ from scipy.stats import f
 from tqdm import tqdm
 from shapely.geometry import Point
 import pulp
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
 
 # extract_frame.py의 전처리 함수들 import
 sys.path.append(str(Path(__file__).parent / 'control_origin_data'))
@@ -35,7 +38,7 @@ TARGET_CRS = 'EPSG:5174'
 # 패치 설정
 N_PATCHES = 50  # 선택할 패치 개수
 PATCH_SIZE = 7  # 7x7 그리드 (700m x 700m)
-PADDING_SIZE = 2  # 노드 주변 near cell padding 크기
+PADDING_SIZE = 3  # 노드 주변 near cell padding 크기
 
 # 한국 공휴일 설정 (2024-2025)
 # 형식: 'YYYY-MM-DD'
@@ -157,7 +160,10 @@ def create_temporal_grid(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
     df_with_time = df.copy()
     df_with_time['hour'] = df_with_time['call_date'].dt.floor('H')
     
-    unique_hours = sorted(df_with_time['hour'].unique())
+    # 데이터가 없는 시간도 0 수요로 포함하기 위해 연속 시간축 생성
+    start_hour = df_with_time['hour'].min()
+    end_hour = df_with_time['hour'].max()
+    unique_hours = list(pd.date_range(start=start_hour, end=end_hour, freq='h'))
     n_timesteps = len(unique_hours)
     
     print(f"\nTemporal grid configuration:")
@@ -522,6 +528,104 @@ def extract_node_demands(temporal_grid: np.ndarray, patches: list[list[dict]]) -
     return demands
 
 
+def visualize_patches_and_demands(sum_grid: np.ndarray, patches: list[list[dict]],
+                                  near_patches: list[list[dict]], output_path: Path):
+    """
+    sum_grid 수요와 patches/near_patches를 시각화하여 저장
+    """
+    print("\n" + "="*60)
+    print("Visualizing sum grid, patches, and near patches")
+    print("="*60)
+    
+    patch_mask = np.zeros_like(sum_grid, dtype=np.uint8)
+    near_mask = np.zeros_like(sum_grid, dtype=np.uint8)
+    
+    for patch_cells in patches:
+        for cell in patch_cells:
+            patch_mask[cell['y'], cell['x']] = 1
+    
+    for near_cells in near_patches:
+        for cell in near_cells:
+            near_mask[cell['y'], cell['x']] = 1
+    
+    # 시각화 시 near는 patch와 분리해서 표현
+    near_only_mask = (near_mask == 1) & (patch_mask == 0)
+    
+    fig, axes = plt.subplots(1, 3, figsize=(24, 8), constrained_layout=True)
+    
+    # 1) 전체 sum_grid 수요 히트맵
+    im0 = axes[0].imshow(sum_grid, cmap='YlOrRd', origin='upper')
+    axes[0].set_title('Sum Grid Demand (All Cells)')
+    axes[0].set_xlabel('Grid X (col)')
+    axes[0].set_ylabel('Grid Y (row)')
+    plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04, label='Demand')
+    
+    # 2) 수요 히트맵 + patch/near overlay + 셀 수요 텍스트
+    im1 = axes[1].imshow(sum_grid, cmap='YlOrRd', origin='upper')
+    axes[1].imshow(
+        np.ma.masked_where(~near_only_mask, near_only_mask),
+        cmap=ListedColormap(['#5DA5DA']),
+        alpha=0.35,
+        origin='upper'
+    )
+    axes[1].imshow(
+        np.ma.masked_where(patch_mask == 0, patch_mask),
+        cmap=ListedColormap(['#F15854']),
+        alpha=0.60,
+        origin='upper'
+    )
+    axes[1].set_title('Demand + Near Cells(Blue) + Patch Cells(Red)')
+    axes[1].set_xlabel('Grid X (col)')
+    axes[1].set_ylabel('Grid Y (row)')
+    plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04, label='Demand')
+    
+    selected_mask = (patch_mask == 1) | near_only_mask
+    selected_coords = np.argwhere(selected_mask)
+    
+    # 라벨 과밀 방지
+    max_text_cells = 1200
+    if len(selected_coords) <= max_text_cells:
+        for r, c in selected_coords:
+            axes[1].text(
+                c, r, str(int(sum_grid[r, c])),
+                fontsize=5, ha='center', va='center', color='black'
+            )
+    else:
+        print(f"  Skip cell text labels: too many selected cells ({len(selected_coords):,})")
+    
+    # 3) patch / near 구분 전용 뷰
+    category = np.zeros_like(sum_grid, dtype=np.uint8)
+    category[near_only_mask] = 1
+    category[patch_mask == 1] = 2
+    
+    axes[2].imshow(sum_grid, cmap='Greys', alpha=0.20, origin='upper')
+    axes[2].imshow(
+        np.ma.masked_where(category == 0, category),
+        cmap=ListedColormap(['#5DA5DA', '#F15854']),
+        vmin=1, vmax=2,
+        alpha=0.95,
+        origin='upper'
+    )
+    axes[2].set_title('Patch/Near Layout')
+    axes[2].set_xlabel('Grid X (col)')
+    axes[2].set_ylabel('Grid Y (row)')
+    axes[2].legend(
+        handles=[
+            Patch(facecolor='#F15854', label='Patch cells'),
+            Patch(facecolor='#5DA5DA', label='Near cells (excluding patch)')
+        ],
+        loc='upper right'
+    )
+    
+    fig.suptitle('Patch and Near-Patch Visualization on Sum Grid', fontsize=14)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+    
+    print(f"  Visualization saved to: {output_path}")
+    print(f"  Patch cells: {int((patch_mask == 1).sum()):,}")
+    print(f"  Near cells (excluding patch): {int(near_only_mask.sum()):,}")
+
+
 def extract_od_flows(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
                     unique_hours: list, coord_to_node: dict,
                     bounds: tuple[float, float, float, float]) -> list[list[dict]]:
@@ -728,6 +832,8 @@ def main():
     # Step 1: 데이터 전처리
     df, gdf = load_and_preprocess_data(origin_csv) #df: demand정보의 dataframe, gdf: demand정보의 geodataframe
     
+    # df.to_csv(output_dir / 'processed_demand_data.csv', index=False)
+    
     # 좌표 범위 계산
     x_coords = gdf.geometry.x.values
     y_coords = gdf.geometry.y.values
@@ -767,6 +873,20 @@ def main():
     print(f"  Total cells in patches: {total_cells}")
     print(f"  Coverage: {coverage*100:.2f}%")
     print(f"  Total score: {total_score:,} / {sum_grid.sum():,} ({total_score/sum_grid.sum()*100:.2f}%)")
+    
+    expected_near_cells = (PATCH_SIZE + 2 * PADDING_SIZE) ** 2 - (PATCH_SIZE ** 2)
+    near_cells_per_node = [len(cells) for cells in near_patches]
+    if near_cells_per_node:
+        print(f"  Expected near cells per node (no boundary clipping): {expected_near_cells}")
+        print(f"  Actual near cells per node: min={min(near_cells_per_node)}, max={max(near_cells_per_node)}, avg={np.mean(near_cells_per_node):.2f}")
+    
+    # Step 4.1: sum_grid + patch/near 시각화
+    visualize_patches_and_demands(
+        sum_grid=sum_grid,
+        patches=patches,
+        near_patches=near_patches,
+        output_path=output_dir / 'patch_near_demands.png'
+    )
     
     # Step 5: 토지 이용 정보 로드 및 구성 계산
     print("\nLoading shapefile and creating land use grid...")
