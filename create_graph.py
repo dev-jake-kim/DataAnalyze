@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 from pathlib import Path
-from scipy.stats import f
+from scipy.stats import f, gaussian_kde
 from tqdm import tqdm
 from shapely.geometry import Point
 import pulp
@@ -626,6 +626,59 @@ def visualize_patches_and_demands(sum_grid: np.ndarray, patches: list[list[dict]
     print(f"  Near cells (excluding patch): {int(near_only_mask.sum()):,}")
 
 
+def plot_node_demand_density_curves(demands: np.ndarray, output_path: Path):
+    """
+    각 노드의 평균 수요와 sigma(표준편차)를 density curve로 시각화
+    demands shape: (T, N)
+    """
+    print("\n" + "="*60)
+    print("Plotting node demand density curves")
+    print("="*60)
+
+    if demands.size == 0 or demands.shape[1] == 0:
+        print("  No node demand data available, skipping density plot")
+        return
+
+    node_mean_demands = demands.mean(axis=0).astype(float)
+    node_sigma_demands = demands.std(axis=0).astype(float)
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 6), constrained_layout=True)
+    plot_specs = [
+        (axes[0], node_mean_demands, 'Node Mean Demand Density', 'Mean demand', '#D95F02'),
+        (axes[1], node_sigma_demands, 'Node Sigma Density', 'Sigma (std)', '#1B9E77'),
+    ]
+
+    for ax, values, title, xlabel, color in plot_specs:
+        values = np.asarray(values, dtype=float)
+
+        if len(values) == 1 or np.allclose(values, values[0]):
+            x_grid = np.linspace(values[0] - 1, values[0] + 1, 200)
+            y_grid = np.zeros_like(x_grid)
+            y_grid[len(y_grid) // 2] = 1.0
+        else:
+            kde = gaussian_kde(values)
+            x_min, x_max = values.min(), values.max()
+            padding = max((x_max - x_min) * 0.15, 1e-6)
+            x_grid = np.linspace(x_min - padding, x_max + padding, 400)
+            y_grid = kde(x_grid)
+
+        ax.plot(x_grid, y_grid, color=color, linewidth=2)
+        ax.fill_between(x_grid, y_grid, color=color, alpha=0.25)
+        ax.axvline(values.mean(), color=color, linestyle='--', linewidth=1.5, alpha=0.9)
+        ax.set_title(title)
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel('Density')
+        ax.grid(alpha=0.25)
+
+    fig.suptitle('Node Demand Statistics Density Curves', fontsize=14)
+    fig.savefig(output_path, dpi=200)
+    plt.close(fig)
+
+    print(f"  Density plot saved to: {output_path}")
+    print(f"  Mean demand stats: min={node_mean_demands.min():.3f}, max={node_mean_demands.max():.3f}, avg={node_mean_demands.mean():.3f}")
+    print(f"  Sigma stats: min={node_sigma_demands.min():.3f}, max={node_sigma_demands.max():.3f}, avg={node_sigma_demands.mean():.3f}")
+
+
 def extract_od_flows(df: pd.DataFrame, gdf: gpd.GeoDataFrame,
                     unique_hours: list, coord_to_node: dict,
                     bounds: tuple[float, float, float, float]) -> list[list[dict]]:
@@ -929,6 +982,12 @@ def main():
     # Step 7: 노드별 시계열 수요 추출
     demands = extract_node_demands(temporal_grid, patches) # demands: 노드별 시계열 수요 리스트
     near_demands = extract_node_demands(temporal_grid, near_patches)  # near_demands: 주변 셀 시계열 수요 리스트
+
+    # Step 7.1: 노드 평균 수요 / sigma density curve 시각화
+    plot_node_demand_density_curves(
+        demands=demands,
+        output_path=output_dir / 'node_demand_density_curves.png'
+    )
     
     # Step 8: 좌표-노드 매핑 생성
     print("\n" + "="*60)
