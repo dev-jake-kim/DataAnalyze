@@ -24,6 +24,11 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 
+try:
+    import contextily as ctx
+except ImportError:
+    ctx = None
+
 # extract_frame.py의 전처리 함수들 import
 sys.path.append(str(Path(__file__).parent / 'control_origin_data'))
 from extract_frame import remove_other_region, eleminate_duplicates, crop_filter
@@ -32,7 +37,7 @@ from extract_frame import remove_other_region, eleminate_duplicates, crop_filter
 US_RANGE_X = (128_950739, 129_500739)
 US_RANGE_Y = (35_756099, 35_305729)
 
-GRID_SIZE = 100  # 100m
+GRID_SIZE = 100  # 700m
 TARGET_CRS = 'EPSG:5174'
 
 # 패치 설정
@@ -114,7 +119,7 @@ def load_and_preprocess_data(csv_path: Path) -> tuple[pd.DataFrame, gpd.GeoDataF
                              time_col='call_date', window_seconds=600)
     
     print("\n[4/4] Applying crop_filter...")
-    df = crop_filter(df, threshold_rate=0.95, step_rate=0.001)
+    df = crop_filter(df, threshold_rate=0.85, step_rate=0.001)
     
     print(f"\nFinal preprocessed data: {len(df):,} rows")
     
@@ -135,6 +140,54 @@ def load_and_preprocess_data(csv_path: Path) -> tuple[pd.DataFrame, gpd.GeoDataF
         print(f"  Destination columns preserved")
     #df.to_csv(csv_path.parent / 'preprocessed_data.csv', index=False, encoding='cp949')
     return df, gdf
+
+
+def visualize_cropped_demand_points(gdf: gpd.GeoDataFrame, output_path: Path):
+    """
+    Step 1 이후 crop 완료된 수요 포인트를 GeoPandas로 시각화
+    """
+    print("\n" + "="*60)
+    print("Visualizing cropped demand points")
+    print("="*60)
+
+    if gdf.empty:
+        print("  GeoDataFrame is empty, skipping point visualization")
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(12, 12))
+    min_x, min_y, max_x, max_y = gdf.total_bounds
+    pad_x = (max_x - min_x) * 0.03
+    pad_y = (max_y - min_y) * 0.03
+    ax.set_xlim(min_x - pad_x, max_x + pad_x)
+    ax.set_ylim(min_y - pad_y, max_y + pad_y)
+
+    if ctx is not None:
+        ctx.add_basemap(
+            ax,
+            crs=gdf.crs,
+            source=ctx.providers.CartoDB.Positron,
+            attribution=False
+        )
+
+    gdf.plot(
+        ax=ax,
+        markersize=0.5,
+        color='#d7301f',
+        alpha=0.12
+    )
+    ax.set_title('Cropped Demand Points After Step 1')
+    ax.set_xlabel(f'X ({TARGET_CRS})')
+    ax.set_ylabel(f'Y ({TARGET_CRS})')
+
+    fig.savefig(output_path, dpi=250, bbox_inches='tight')
+    plt.close(fig)
+
+    print(f"  Cropped demand point map saved to: {output_path}")
+    print(f"  Total plotted points: {len(gdf):,}")
+    if ctx is None:
+        print("  contextily is not installed, basemap was skipped")
 
 
 def create_temporal_grid(df: pd.DataFrame, gdf: gpd.GeoDataFrame, 
@@ -529,14 +582,28 @@ def extract_node_demands(temporal_grid: np.ndarray, patches: list[list[dict]]) -
 
 
 def visualize_patches_and_demands(sum_grid: np.ndarray, patches: list[list[dict]],
-                                  near_patches: list[list[dict]], output_path: Path):
+                                  near_patches: list[list[dict]], output_path: Path,
+                                  bounds: tuple[float, float, float, float]):
     """
     sum_grid 수요와 patches/near_patches를 시각화하여 저장
     """
     print("\n" + "="*60)
     print("Visualizing sum grid, patches, and near patches")
     print("="*60)
-    
+
+    min_x, max_x, min_y, max_y = bounds
+    extent = (min_x, max_x, min_y, max_y)
+    max_demand = float(sum_grid.max()) if sum_grid.size > 0 else 0.0
+
+    if max_demand > 0:
+        normalized_demand = sum_grid.astype(float) / max_demand
+        # 낮은 수요는 투명하게, 높은 수요는 더 진하게 보이도록 alpha를 비선형 스케일링
+        demand_alpha = np.where(sum_grid > 0, normalized_demand ** 0.8, 0.0)
+        masked_sum_grid = np.ma.masked_where(sum_grid <= 0, sum_grid)
+    else:
+        demand_alpha = np.zeros_like(sum_grid, dtype=float)
+        masked_sum_grid = np.ma.masked_where(np.ones_like(sum_grid, dtype=bool), sum_grid)
+
     patch_mask = np.zeros_like(sum_grid, dtype=np.uint8)
     near_mask = np.zeros_like(sum_grid, dtype=np.uint8)
     
@@ -552,63 +619,97 @@ def visualize_patches_and_demands(sum_grid: np.ndarray, patches: list[list[dict]
     near_only_mask = (near_mask == 1) & (patch_mask == 0)
     
     fig, axes = plt.subplots(1, 3, figsize=(24, 8), constrained_layout=True)
-    
+
+    def setup_basemap(ax):
+        ax.set_xlim(min_x, max_x)
+        ax.set_ylim(min_y, max_y)
+        if ctx is not None:
+            ctx.add_basemap(
+                ax,
+                crs=TARGET_CRS,
+                source=ctx.providers.CartoDB.Positron,
+                attribution=False
+            )
+        ax.set_xlabel('X (EPSG:5174)')
+        ax.set_ylabel('Y (EPSG:5174)')
+
     # 1) 전체 sum_grid 수요 히트맵
-    im0 = axes[0].imshow(sum_grid, cmap='YlOrRd', origin='upper')
+    setup_basemap(axes[0])
+    im0 = axes[0].imshow(
+        masked_sum_grid,
+        cmap='Reds',
+        origin='upper',
+        extent=extent,
+        alpha=demand_alpha,
+        vmin=0,
+        vmax=max_demand if max_demand > 0 else 1
+    )
     axes[0].set_title('Sum Grid Demand (All Cells)')
-    axes[0].set_xlabel('Grid X (col)')
-    axes[0].set_ylabel('Grid Y (row)')
     plt.colorbar(im0, ax=axes[0], fraction=0.046, pad=0.04, label='Demand')
-    
+
     # 2) 수요 히트맵 + patch/near overlay + 셀 수요 텍스트
-    im1 = axes[1].imshow(sum_grid, cmap='YlOrRd', origin='upper')
+    setup_basemap(axes[1])
+    im1 = axes[1].imshow(
+        masked_sum_grid,
+        cmap='Reds',
+        origin='upper',
+        extent=extent,
+        alpha=demand_alpha,
+        vmin=0,
+        vmax=max_demand if max_demand > 0 else 1
+    )
     axes[1].imshow(
         np.ma.masked_where(~near_only_mask, near_only_mask),
         cmap=ListedColormap(['#5DA5DA']),
         alpha=0.35,
-        origin='upper'
+        origin='upper',
+        extent=extent
     )
     axes[1].imshow(
         np.ma.masked_where(patch_mask == 0, patch_mask),
         cmap=ListedColormap(['#F15854']),
         alpha=0.60,
-        origin='upper'
+        origin='upper',
+        extent=extent
     )
     axes[1].set_title('Demand + Near Cells(Blue) + Patch Cells(Red)')
-    axes[1].set_xlabel('Grid X (col)')
-    axes[1].set_ylabel('Grid Y (row)')
     plt.colorbar(im1, ax=axes[1], fraction=0.046, pad=0.04, label='Demand')
-    
-    selected_mask = (patch_mask == 1) | near_only_mask
-    selected_coords = np.argwhere(selected_mask)
-    
+
+    selected_coords = set()
+    for patch_cells in patches:
+        selected_coords.update((cell['y'], cell['x']) for cell in patch_cells)
+    for near_cells in near_patches:
+        selected_coords.update((cell['y'], cell['x']) for cell in near_cells)
+
     # 라벨 과밀 방지
     max_text_cells = 1200
     if len(selected_coords) <= max_text_cells:
         for r, c in selected_coords:
+            x_center = min_x + (c + 0.5) * GRID_SIZE
+            y_center = max_y - (r + 0.5) * GRID_SIZE
             axes[1].text(
-                c, r, str(int(sum_grid[r, c])),
+                x_center, y_center, str(int(sum_grid[r, c])),
                 fontsize=5, ha='center', va='center', color='black'
             )
     else:
         print(f"  Skip cell text labels: too many selected cells ({len(selected_coords):,})")
-    
+
     # 3) patch / near 구분 전용 뷰
     category = np.zeros_like(sum_grid, dtype=np.uint8)
     category[near_only_mask] = 1
     category[patch_mask == 1] = 2
-    
-    axes[2].imshow(sum_grid, cmap='Greys', alpha=0.20, origin='upper')
+
+    setup_basemap(axes[2])
+    axes[2].imshow(masked_sum_grid, cmap='Greys', alpha=demand_alpha * 0.35, origin='upper', extent=extent)
     axes[2].imshow(
         np.ma.masked_where(category == 0, category),
         cmap=ListedColormap(['#5DA5DA', '#F15854']),
         vmin=1, vmax=2,
         alpha=0.95,
-        origin='upper'
+        origin='upper',
+        extent=extent
     )
     axes[2].set_title('Patch/Near Layout')
-    axes[2].set_xlabel('Grid X (col)')
-    axes[2].set_ylabel('Grid Y (row)')
     axes[2].legend(
         handles=[
             Patch(facecolor='#F15854', label='Patch cells'),
@@ -618,12 +719,14 @@ def visualize_patches_and_demands(sum_grid: np.ndarray, patches: list[list[dict]
     )
     
     fig.suptitle('Patch and Near-Patch Visualization on Sum Grid', fontsize=14)
-    fig.savefig(output_path, dpi=200)
+    fig.savefig(output_path, dpi=600)
     plt.close(fig)
-    
+
     print(f"  Visualization saved to: {output_path}")
     print(f"  Patch cells: {int((patch_mask == 1).sum()):,}")
     print(f"  Near cells (excluding patch): {int(near_only_mask.sum()):,}")
+    if ctx is None:
+        print("  contextily is not installed, basemap was skipped")
 
 
 def plot_node_demand_density_curves(demands: np.ndarray, output_path: Path):
@@ -884,8 +987,11 @@ def main():
     
     # Step 1: 데이터 전처리
     df, gdf = load_and_preprocess_data(origin_csv) #df: demand정보의 dataframe, gdf: demand정보의 geodataframe
-    
-    # df.to_csv(output_dir / 'processed_demand_data.csv', index=False)
+
+    visualize_cropped_demand_points(
+        gdf=gdf,
+        output_path=output_dir / 'step1_cropped_demand_points.png'
+    )
     
     # 좌표 범위 계산
     x_coords = gdf.geometry.x.values
@@ -938,7 +1044,8 @@ def main():
         sum_grid=sum_grid,
         patches=patches,
         near_patches=near_patches,
-        output_path=output_dir / 'patch_near_demands.png'
+        output_path=output_dir / 'patch_near_demands.png',
+        bounds=bounds
     )
     
     # Step 5: 토지 이용 정보 로드 및 구성 계산

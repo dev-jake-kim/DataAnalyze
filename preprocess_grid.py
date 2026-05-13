@@ -14,6 +14,12 @@ import matplotlib.pyplot as plt
 from shapely.geometry import Point
 from pathlib import Path
 from tqdm import tqdm
+from matplotlib.colors import ListedColormap
+
+try:
+    import contextily as ctx
+except ImportError:
+    ctx = None
 
 # extract_frame.py의 전처리 함수들 import
 sys.path.append(str(Path(__file__).parent / 'control_origin_data'))
@@ -30,7 +36,56 @@ GRID_SIZE = 100  # 100m (미터 기반 좌표계에서)
 TARGET_CRS = 'EPSG:5174'
 
 
-def load_and_preprocess_origin_data(csv_path: Path) -> gpd.GeoDataFrame:
+def bounds_from_total_bounds(total_bounds: np.ndarray | list[float] | tuple[float, float, float, float]) -> tuple[float, float, float, float]:
+    min_x, min_y, max_x, max_y = total_bounds
+    return min_x, max_x, min_y, max_y
+
+
+def pad_bounds(bounds: tuple[float, float, float, float], pad_ratio: float = 0.03) -> tuple[float, float, float, float]:
+    min_x, max_x, min_y, max_y = bounds
+    width = max_x - min_x
+    height = max_y - min_y
+    pad_x = max(width * pad_ratio, GRID_SIZE)
+    pad_y = max(height * pad_ratio, GRID_SIZE)
+    return min_x - pad_x, max_x + pad_x, min_y - pad_y, max_y + pad_y
+
+
+def apply_basemap(ax, bounds: tuple[float, float, float, float], crs: str = TARGET_CRS):
+    min_x, max_x, min_y, max_y = pad_bounds(bounds)
+    ax.set_xlim(min_x, max_x)
+    ax.set_ylim(min_y, max_y)
+
+    if ctx is not None:
+        ctx.add_basemap(
+            ax,
+            crs=crs,
+            source=ctx.providers.CartoDB.Positron,
+            attribution=False
+        )
+        ax.set_xlim(min_x, max_x)
+        ax.set_ylim(min_y, max_y)
+
+    ax.set_xlabel(f'X ({crs})')
+    ax.set_ylabel(f'Y ({crs})')
+
+
+def xy_dataframe_to_projected_gdf(df: pd.DataFrame) -> gpd.GeoDataFrame:
+    """
+    xpos/ypos(소수점 생략 WGS84)를 EPSG:5174 GeoDataFrame으로 변환
+    """
+    df_geo = df[['xpos', 'ypos']].dropna().copy()
+    df_geo['lon'] = df_geo['xpos'] / 1_000_000
+    df_geo['lat'] = df_geo['ypos'] / 1_000_000
+
+    gdf = gpd.GeoDataFrame(
+        df_geo,
+        geometry=gpd.points_from_xy(df_geo['lon'], df_geo['lat']),
+        crs='EPSG:4326'
+    )
+    return gdf.to_crs(TARGET_CRS)
+
+
+def load_and_preprocess_origin_data(csv_path: Path) -> tuple[gpd.GeoDataFrame, dict[str, gpd.GeoDataFrame]]:
     """
     origin_data.csv를 로드하고 전처리 적용
     1. remove_other_region: 지역 범위 밖 데이터 제거
@@ -56,23 +111,23 @@ def load_and_preprocess_origin_data(csv_path: Path) -> gpd.GeoDataFrame:
     
     # [1] remove_other_region: 울산 지역 범위로 필터링
     print("\n[2/4] Applying remove_other_region...")
-    df = remove_other_region(df, x_col='xpos', y_col='ypos', 
-                             x_range=US_RANGE_X, y_range=US_RANGE_Y)
-    print(f"  After region filter: {len(df):,} rows")
+    df_region = remove_other_region(df, x_col='xpos', y_col='ypos', 
+                                    x_range=US_RANGE_X, y_range=US_RANGE_Y)
+    print(f"  After region filter: {len(df_region):,} rows")
     
     # [2] eleminate_duplicates: 중복 제거
     print("\n[3/4] Applying eleminate_duplicates...")
-    df = eleminate_duplicates(df, client_col='clientid', 
-                             time_col='call_date', window_seconds=600)
-    print(f"  After duplicate removal: {len(df):,} rows")
+    df_dedup = eleminate_duplicates(df_region, client_col='clientid', 
+                                    time_col='call_date', window_seconds=600)
+    print(f"  After duplicate removal: {len(df_dedup):,} rows")
     
     # [3] crop_filter: outlier 제거
     print("\n[4/4] Applying crop_filter...")
-    df = crop_filter(df, threshold_rate=0.85, step_rate=0.001)
-    print(f"  After crop filter: {len(df):,} rows")
+    df_cropped = crop_filter(df_dedup, threshold_rate=0.85, step_rate=0.001)
+    print(f"  After crop filter: {len(df_cropped):,} rows")
     
     # 필요한 컬럼만 선택
-    df = df[['xpos', 'ypos']].copy()
+    df_points = df_cropped[['xpos', 'ypos']].copy()
     
     print("\n" + "="*60)
     print("Step 2: Converting to GeoDataFrame and CRS transformation")
@@ -80,14 +135,14 @@ def load_and_preprocess_origin_data(csv_path: Path) -> gpd.GeoDataFrame:
     
     # 정수 좌표를 실제 WGS84 좌표로 변환 (소수점 복원)
     print("\nConverting integer coordinates to WGS84...")
-    df['lon'] = df['xpos'] / 1_000_000
-    df['lat'] = df['ypos'] / 1_000_000
+    df_points['lon'] = df_points['xpos'] / 1_000_000
+    df_points['lat'] = df_points['ypos'] / 1_000_000
     
     # GeoDataFrame으로 변환 (WGS84)
     print("Creating GeoDataFrame...")
     gdf = gpd.GeoDataFrame(
-        df,
-        geometry=gpd.points_from_xy(df['lon'], df['lat']),
+        df_points,
+        geometry=gpd.points_from_xy(df_points['lon'], df_points['lat']),
         crs='EPSG:4326'  # WGS84
     )
     
@@ -96,8 +151,200 @@ def load_and_preprocess_origin_data(csv_path: Path) -> gpd.GeoDataFrame:
     gdf = gdf.to_crs(TARGET_CRS)
     
     print(f"  Final preprocessed data: {len(gdf):,} points")
-    
-    return gdf
+
+    preprocess_stages = {
+        'step1_raw': xy_dataframe_to_projected_gdf(df[['xpos', 'ypos']]),
+        'step1_region_filtered': xy_dataframe_to_projected_gdf(df_region[['xpos', 'ypos']]),
+        'step1_deduplicated': xy_dataframe_to_projected_gdf(df_dedup[['xpos', 'ypos']]),
+        'step1_cropped': xy_dataframe_to_projected_gdf(df_cropped[['xpos', 'ypos']]),
+        'step2_projected': gdf.copy(),
+    }
+
+    return gdf, preprocess_stages
+
+
+def visualize_point_stage(gdf: gpd.GeoDataFrame, output_path: Path, title: str,
+                          color: str = '#d7301f', alpha: float = 0.10,
+                          markersize: float = 0.5):
+    """
+    GeoDataFrame 포인트 시각화
+    """
+    if gdf.empty:
+        print(f"  Skipping {output_path.name}: empty GeoDataFrame")
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    fig, ax = plt.subplots(figsize=(12, 12))
+    apply_basemap(ax, bounds_from_total_bounds(gdf.total_bounds), crs=TARGET_CRS)
+    gdf.plot(ax=ax, color=color, alpha=alpha, markersize=markersize)
+    ax.set_title(title, fontsize=16, fontweight='bold')
+    plt.savefig(output_path, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def visualize_landuse_polygons(gdf: gpd.GeoDataFrame, output_path: Path):
+    """
+    shapefile polygon 결과 시각화
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    plot_gdf = gdf.copy()
+    plot_gdf['landuse_code'] = plot_gdf['ATRB_SE'].astype(str).str.extract(r'UQA(\d)', expand=False).fillna('0').astype(int)
+
+    colors = ['#f7f7f7', '#e41a1c', '#ff7f00', '#ffd92f', '#4daf4a', '#377eb8']
+    cmap = ListedColormap(colors)
+
+    fig, ax = plt.subplots(figsize=(12, 12))
+    apply_basemap(ax, bounds_from_total_bounds(plot_gdf.total_bounds), crs=TARGET_CRS)
+    plot_gdf.plot(
+        ax=ax,
+        column='landuse_code',
+        cmap=cmap,
+        linewidth=0.15,
+        edgecolor='black',
+        alpha=0.55,
+        legend=True
+    )
+    ax.set_title('Step 4: Land Use Polygons', fontsize=16, fontweight='bold')
+    plt.savefig(output_path, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def visualize_demand_grid_step(demand_grid: np.ndarray,
+                               bounds: tuple[float, float, float, float],
+                               output_path: Path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    min_x, max_x, min_y, max_y = bounds
+    extent = (min_x, max_x, min_y, max_y)
+    demand_masked = np.ma.masked_where(demand_grid == 0, demand_grid)
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    apply_basemap(ax, bounds, crs=TARGET_CRS)
+    im = ax.imshow(
+        demand_masked,
+        cmap='hot',
+        interpolation='nearest',
+        origin='upper',
+        extent=extent,
+        alpha=0.75
+    )
+    ax.set_title('Step 3: Taxi Demand Grid (100m x 100m)', fontsize=16, fontweight='bold')
+    plt.colorbar(im, ax=ax, label='Demand Count')
+    plt.savefig(output_path, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def visualize_landuse_grid_step(landuse_grid: np.ndarray,
+                                bounds: tuple[float, float, float, float],
+                                output_path: Path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    colors = ['white', 'red', 'orange', 'yellow', 'green', 'blue']
+    cmap = ListedColormap(colors)
+    min_x, max_x, min_y, max_y = bounds
+    extent = (min_x, max_x, min_y, max_y)
+    landuse_masked = np.ma.masked_where(landuse_grid == 0, landuse_grid)
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    apply_basemap(ax, bounds, crs=TARGET_CRS)
+    im = ax.imshow(
+        landuse_masked,
+        cmap=cmap,
+        interpolation='nearest',
+        origin='upper',
+        vmin=0,
+        vmax=5,
+        extent=extent,
+        alpha=0.60
+    )
+    ax.set_title('Step 5: Land Use Grid', fontsize=16, fontweight='bold')
+
+    cbar = plt.colorbar(im, ax=ax, ticks=[0, 1, 2, 3, 4, 5])
+    cbar.set_label('Land Use Category')
+    cbar.ax.set_yticklabels(['Unclassified', 'UQA1xx', 'UQA2xx', 'UQA3xx', 'UQA4xx', 'UQA5xx'])
+
+    plt.savefig(output_path, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def visualize_combined_grid_step(demand_grid: np.ndarray,
+                                 landuse_grid: np.ndarray,
+                                 bounds: tuple[float, float, float, float],
+                                 output_path: Path):
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    colors = ['white', 'red', 'orange', 'yellow', 'green', 'blue']
+    cmap = ListedColormap(colors)
+    min_x, max_x, min_y, max_y = bounds
+    extent = (min_x, max_x, min_y, max_y)
+    landuse_masked = np.ma.masked_where(landuse_grid == 0, landuse_grid)
+    demand_masked = np.ma.masked_where(demand_grid == 0, demand_grid)
+
+    fig, ax = plt.subplots(figsize=(12, 10))
+    apply_basemap(ax, bounds, crs=TARGET_CRS)
+    ax.imshow(
+        landuse_masked,
+        cmap=cmap,
+        interpolation='nearest',
+        origin='upper',
+        vmin=0,
+        vmax=5,
+        extent=extent,
+        alpha=0.45
+    )
+    im = ax.imshow(
+        demand_masked,
+        cmap='hot',
+        interpolation='nearest',
+        origin='upper',
+        extent=extent,
+        alpha=0.35
+    )
+    ax.set_title('Step 6: Combined Land Use + Taxi Demand', fontsize=16, fontweight='bold')
+    plt.colorbar(im, ax=ax, label='Demand Count')
+    plt.savefig(output_path, dpi=180, bbox_inches='tight')
+    plt.close(fig)
+    print(f"  Saved: {output_path}")
+
+
+def visualize_preprocess_steps(preprocess_stages: dict[str, gpd.GeoDataFrame],
+                               demand_grid: np.ndarray,
+                               gdf_landuse: gpd.GeoDataFrame,
+                               landuse_grid: np.ndarray,
+                               bounds: tuple[float, float, float, float],
+                               output_dir: Path):
+    """
+    각 step 결과를 개별 파일로 저장
+    """
+    print("\n" + "="*60)
+    print("Saving step-by-step visualizations")
+    print("="*60)
+    if ctx is None:
+        print("  contextily is not installed, basemap will be skipped")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    point_specs = [
+        ('step1_raw', 'Step 1-0: Raw Demand Points', 'step1_0_raw_points.png'),
+        ('step1_region_filtered', 'Step 1-1: Region Filtered Points', 'step1_1_region_filtered_points.png'),
+        ('step1_deduplicated', 'Step 1-2: Deduplicated Points', 'step1_2_deduplicated_points.png'),
+        ('step1_cropped', 'Step 1-3: Cropped Points', 'step1_3_cropped_points.png'),
+        ('step2_projected', f'Step 2: Points Projected to {TARGET_CRS}', 'step2_projected_points.png'),
+    ]
+
+    for key, title, filename in point_specs:
+        visualize_point_stage(preprocess_stages[key], output_dir / filename, title)
+
+    visualize_demand_grid_step(demand_grid, bounds, output_dir / 'step3_demand_grid.png')
+    visualize_landuse_polygons(gdf_landuse, output_dir / 'step4_landuse_polygons.png')
+    visualize_landuse_grid_step(landuse_grid, bounds, output_dir / 'step5_landuse_grid.png')
+    visualize_combined_grid_step(demand_grid, landuse_grid, bounds, output_dir / 'step6_combined_grid.png')
 
 
 def create_demand_grid(gdf: gpd.GeoDataFrame) -> tuple[np.ndarray, tuple[float, float, float, float]]:
@@ -256,7 +503,8 @@ def map_landuse_to_grid(gdf: gpd.GeoDataFrame, grid_shape: tuple[int, int],
     return landuse_grid
 
 
-def visualize_and_save(demand_grid: np.ndarray, landuse_grid: np.ndarray, 
+def visualize_and_save(demand_grid: np.ndarray, landuse_grid: np.ndarray,
+                       bounds: tuple[float, float, float, float],
                        output_dir: Path):
     """
     Grid를 시각화하고 저장
@@ -266,65 +514,21 @@ def visualize_and_save(demand_grid: np.ndarray, landuse_grid: np.ndarray,
     print("="*60)
     
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # 1. Demand grid 시각화
     print("\n[1/3] Creating demand grid visualization...")
-    fig, ax = plt.subplots(figsize=(12, 10))
-    im = ax.imshow(demand_grid, cmap='hot', interpolation='nearest')
-    ax.set_title('Taxi Demand Grid (100m x 100m)', fontsize=16, fontweight='bold')
-    ax.set_xlabel('X Grid Index')
-    ax.set_ylabel('Y Grid Index')
-    plt.colorbar(im, ax=ax, label='Demand Count')
-    
     demand_path = output_dir / 'demand_grid.png'
-    plt.savefig(demand_path, dpi=150, bbox_inches='tight')
-    print(f"  Saved: {demand_path}")
-    plt.close()
-    
+    visualize_demand_grid_step(demand_grid, bounds, demand_path)
+
     # 2. Land use grid 시각화
     print("\n[2/3] Creating land use grid visualization...")
-    fig, ax = plt.subplots(figsize=(12, 10))
-    
-    # 색상 맵: 0=white, 1=red, 2=orange, 3=yellow, 4=green, 5=blue
-    from matplotlib.colors import ListedColormap
-    colors = ['white', 'red', 'orange', 'yellow', 'green', 'blue']
-    cmap = ListedColormap(colors)
-    
-    im = ax.imshow(landuse_grid, cmap=cmap, interpolation='nearest', vmin=0, vmax=5)
-    ax.set_title('Land Use Grid (from ATRB_SE)', fontsize=16, fontweight='bold')
-    ax.set_xlabel('X Grid Index')
-    ax.set_ylabel('Y Grid Index')
-    
-    # Colorbar with labels
-    cbar = plt.colorbar(im, ax=ax, ticks=[0, 1, 2, 3, 4, 5])
-    cbar.set_label('Land Use Category')
-    cbar.ax.set_yticklabels(['Unclassified', 'UQA1xx', 'UQA2xx', 'UQA3xx', 'UQA4xx', 'UQA5xx'])
-    
     landuse_path = output_dir / 'landuse_grid.png'
-    plt.savefig(landuse_path, dpi=150, bbox_inches='tight')
-    print(f"  Saved: {landuse_path}")
-    plt.close()
-    
+    visualize_landuse_grid_step(landuse_grid, bounds, landuse_path)
+
     # 3. Combined visualization (overlay)
     print("\n[3/3] Creating combined visualization...")
-    fig, ax = plt.subplots(figsize=(12, 10))
-    
-    # Land use as base
-    ax.imshow(landuse_grid, cmap=cmap, interpolation='nearest', vmin=0, vmax=5, alpha=0.6)
-    
-    # Demand as overlay (only show non-zero)
-    demand_masked = np.ma.masked_where(demand_grid == 0, demand_grid)
-    im = ax.imshow(demand_masked, cmap='hot', interpolation='nearest', alpha=0.4)
-    
-    ax.set_title('Combined: Land Use + Taxi Demand', fontsize=16, fontweight='bold')
-    ax.set_xlabel('X Grid Index')
-    ax.set_ylabel('Y Grid Index')
-    plt.colorbar(im, ax=ax, label='Demand Count')
-    
     combined_path = output_dir / 'combined_grid.png'
-    plt.savefig(combined_path, dpi=150, bbox_inches='tight')
-    print(f"  Saved: {combined_path}")
-    plt.close()
+    visualize_combined_grid_step(demand_grid, landuse_grid, bounds, combined_path)
     
     # 4. Save grids as numpy arrays
     print("\nSaving numpy arrays...")
@@ -339,6 +543,7 @@ def main():
     base_dir = Path(__file__).parent
     data_dir = base_dir / 'data'
     output_dir = base_dir / 'output'
+    step_output_dir = output_dir / 'step_visualizations'
     
     origin_csv = data_dir / 'origin_data.csv'
     shp_file = data_dir / 'UPIS_C_UQ111.shp'
@@ -348,7 +553,7 @@ def main():
     print("╚" + "="*58 + "╝\n")
     
     # Step 1-2: Load and preprocess origin data
-    gdf_preprocessed = load_and_preprocess_origin_data(origin_csv)
+    gdf_preprocessed, preprocess_stages = load_and_preprocess_origin_data(origin_csv)
     
     # Step 3: Create demand grid
     demand_grid, bounds = create_demand_grid(gdf_preprocessed)
@@ -358,15 +563,26 @@ def main():
     
     # Step 5: Map land use to grid
     landuse_grid = map_landuse_to_grid(gdf_landuse, demand_grid.shape, bounds)
+
+    # Step별 결과 저장
+    visualize_preprocess_steps(
+        preprocess_stages=preprocess_stages,
+        demand_grid=demand_grid,
+        gdf_landuse=gdf_landuse,
+        landuse_grid=landuse_grid,
+        bounds=bounds,
+        output_dir=step_output_dir
+    )
     
     # Step 6: Visualize and save
-    visualize_and_save(demand_grid, landuse_grid, output_dir)
+    visualize_and_save(demand_grid, landuse_grid, bounds, output_dir)
     
     print("\n" + "╔" + "="*58 + "╗")
     print("║" + " "*18 + "PROCESSING COMPLETE!" + " "*19 + "║")
     print("╚" + "="*58 + "╝\n")
     
     print(f"All outputs saved to: {output_dir}")
+    print(f"Step visualizations saved to: {step_output_dir}")
 
 
 if __name__ == '__main__':
