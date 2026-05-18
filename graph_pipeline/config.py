@@ -12,7 +12,7 @@ class GraphBuildConfig:
     n_patches: int = 50
     patch_size: int = 7
     padding_size: int = 3
-    cbc_path: str = "/opt/homebrew/opt/cbc/bin/cbc"
+    cbc_path: str | None = None
     origin_csv_name: str = 'origin_data.csv'
     shapefile_name: str = 'UPIS_C_UQ111.shp'
     poi_csv_name: str = 'poi_data.csv'

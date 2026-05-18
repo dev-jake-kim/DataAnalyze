@@ -56,7 +56,7 @@ def create_temporal_grid(
     n_rows = int(np.ceil(height / config.grid_size))
 
     df_with_time = df.copy()
-    df_with_time['hour'] = df_with_time['call_date'].dt.floor('H')
+    df_with_time['hour'] = df_with_time['call_date'].dt.floor('h')
 
     start_hour = df_with_time['hour'].min()
     end_hour = df_with_time['hour'].max()
@@ -147,7 +147,8 @@ def get_patch(
             if applicable_patches:
                 problem += pulp.lpSum(applicable_patches) <= 1
 
-    problem.solve(pulp.COIN_CMD(msg=0, path=config.cbc_path))
+    solver = pulp.COIN_CMD(msg=0, path=config.cbc_path) if config.cbc_path else pulp.PULP_CBC_CMD(msg=0)
+    problem.solve(solver)
 
     best_patches_tl: list[tuple[int, int]] = []
     for row_idx in range(n_rows - a + 1):
