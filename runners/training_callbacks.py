@@ -7,7 +7,11 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
+import torch
+from torch.utils.data import DataLoader, Subset
 from transformers import TrainerCallback, TrainerControl, TrainerState, TrainingArguments
+
+from loaders.dataset import collate_fn
 
 log = logging.getLogger(__name__)
 
@@ -119,6 +123,46 @@ class TrainMetricsCallback(TrainerCallback):
         run_id = '/'.join(Path(args.output_dir).parts[-2:])
         csv_path = Path(args.output_dir).parent.parent / 'results.csv'
         append_run_to_csv(csv_path, run_id, val_data)
+
+
+# ------------------------------------------------------------------
+class RagDbUpdateCallback(TrainerCallback):
+    """
+    Rebuilds the RAG retrieval database at the start of each epoch by
+    re-running the current node_embedder over all training samples.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        train_indices: list,
+        device: torch.device,
+        batch_size: int = 64,
+    ):
+        self.dataset = dataset
+        self.train_indices = train_indices
+        self.device = device
+        self.batch_size = batch_size
+
+    def on_epoch_begin(
+        self,
+        args: TrainingArguments,
+        state: TrainerState,
+        control: TrainerControl,
+        model=None,
+        **kwargs,
+    ) -> None:
+        if model is None or not hasattr(model, 'update_db'):
+            return
+        loader = DataLoader(
+            Subset(self.dataset, self.train_indices),
+            batch_size=self.batch_size,
+            shuffle=False,
+            collate_fn=collate_fn,
+        )
+        model.update_db(loader, self.device)
+        log.info('RAG DB updated at epoch %d (%d entries)',
+                 state.epoch or 0, len(self.train_indices))
 
 
 # ------------------------------------------------------------------

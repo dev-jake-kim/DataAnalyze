@@ -1,0 +1,66 @@
+project_name: rag
+
+model:
+  d_model: 32
+  nhead: 8
+  num_encoder_layers_1: 2
+  num_encoder_layers_2: 4
+  dim_feedforward: 128
+  dropout: 0.1
+  gamma: 0.01
+  norm_first: true
+  data_path: data/processed/graph_data.json
+
+dataset:
+  history_len: 24
+  data_path: data/processed/graph_data.json
+  temporal_grid_path: data/processed/temporal_grid.npy
+
+stage1:
+  train:
+    num_train_epochs: 50
+    per_device_train_batch_size: 16
+    per_device_eval_batch_size: 32
+    save_total_limit: 1
+    learning_rate: 1.0e-4
+    weight_decay: 1.0e-2
+    warmup_ratio: 0.05
+    eval_strategy: epoch
+    save_strategy: epoch
+    load_best_model_at_end: true
+    metric_for_best_model: evaluater
+    dataloader_num_workers: 4
+  callbacks:
+    early_stopping:
+      early_stopping_patience: 10
+      early_stopping_threshold: 0.0001
+
+stage2:
+  start_idx: 40  # Stage 2 학습 시작 인덱스 (과거 시퀀스 최소 40개 보장)
+  train:
+    num_train_epochs: 30
+    per_device_train_batch_size: 16
+    per_device_eval_batch_size: 32
+    save_total_limit: 1
+    learning_rate: 5.0e-5
+    weight_decay: 1.0e-2
+    warmup_ratio: 0.05
+    eval_strategy: epoch
+    save_strategy: epoch
+    load_best_model_at_end: true
+    metric_for_best_model: evaluater
+    dataloader_num_workers: 4
+  callbacks:
+    early_stopping:
+      early_stopping_patience: 100
+      early_stopping_threshold: 0.0001
+
+test:
+  batch_size: 64
+
+device: cuda
+seed: 42
+
+hydra:
+  run:
+    dir: ./projects/${project_name}/${now:%Y-%m-%d}/${now:%H-%M-%S}

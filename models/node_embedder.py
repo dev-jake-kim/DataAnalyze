@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -40,7 +41,10 @@ class NodeEmbedder(nn.Module):
 
     For each (batch, timestep), processes 49 cells per 50 nodes through
     a Transformer Encoder, producing one embedding vector per node.
-    Node IDs are NOT used here (position-only spatial context).
+
+    Also computes a sequence-level meaning vector via a CLS token:
+    the 50 node embeddings per timestep are aggregated through cls_encoder,
+    then averaged over h to produce a single [B, d_model] vector per sample.
     """
 
     def __init__(
@@ -77,13 +81,25 @@ class NodeEmbedder(nn.Module):
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
 
+        # CLS: per-timestep node-sequence aggregator
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        cls_layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            batch_first=True,
+            norm_first=norm_first,
+        )
+        self.cls_encoder = nn.TransformerEncoder(cls_layer, num_layers=1)
+
     def forward(
         self,
         cell_demands: torch.Tensor,   # [B, h, 50, 49]  long
         day:          torch.Tensor,   # [B, h]           long (0-6)
         time_idx:     torch.Tensor,   # [B, h]           long (0-23)
         holiday:      torch.Tensor,   # [B, h]           long (0-1)
-    ) -> torch.Tensor:                # [B, h, 50, d_model]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:  # ([B, h, 50, d], [B, d])
         B, h, N, C = cell_demands.shape
         d = self.cell_pe.shape[-1]
 
@@ -98,4 +114,13 @@ class NodeEmbedder(nn.Module):
         x = x.reshape(B * h * N, C, d)                # [B*h*50, 49, d]
         x = self.encoder(x)                            # [B*h*50, 49, d]
 
-        return x.mean(dim=1).reshape(B, h, N, d)       # [B, h, 50, d]
+        node_embed = x.mean(dim=1).reshape(B, h, N, d) # [B, h, 50, d]
+
+        # CLS: aggregate 50 nodes per timestep → [B, d] meaning vector
+        x_cls = node_embed.reshape(B * h, N, d)                      # [B*h, 50, d]
+        cls = self.cls_token.expand(B * h, 1, d)                      # [B*h, 1, d]
+        x_cls = torch.cat([cls, x_cls], dim=1)                        # [B*h, 51, d]
+        x_cls = self.cls_encoder(x_cls)                               # [B*h, 51, d]
+        seq_vec = x_cls[:, 0, :].reshape(B, h, d).mean(dim=1)        # [B, d]
+
+        return node_embed, seq_vec

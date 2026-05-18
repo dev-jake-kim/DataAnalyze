@@ -49,6 +49,7 @@ class DemandDataset(Dataset):
             'time_idx':     torch.tensor(self.times[idx:idx+h], dtype=torch.long),
             'holiday':      torch.tensor(self.holidays[idx:idx+h], dtype=torch.long),
             'labels':       torch.tensor(label,                 dtype=torch.float32),
+            'idx':          torch.tensor(idx,                   dtype=torch.long),
         }
 
 
@@ -59,4 +60,5 @@ def collate_fn(batch: List[dict]) -> dict:
         'time_idx':     torch.stack([b['time_idx']     for b in batch]),  # [B, h]
         'holiday':      torch.stack([b['holiday']      for b in batch]),  # [B, h]
         'labels':       torch.stack([b['labels']       for b in batch]),  # [B, 50]
+        'idx':          torch.stack([b['idx']          for b in batch]),  # [B]
     }

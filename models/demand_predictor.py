@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -50,10 +52,10 @@ class DemandPredictor(nn.Module):
         self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
         self.head = nn.Linear(d_model, 1)
 
-    def forward(self, node_embed: torch.Tensor) -> torch.Tensor:
+    def forward(self, node_embed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         node_embed: [B, h, 50, d_model]  (from NodeEmbedder)
-        returns:    [B, 50]  predicted demands (non-negative)
+        returns:    ([B, 50] predictions, [B, 50, d_model] internal embedding)
         """
         B, h, N, d = node_embed.shape
 
@@ -66,6 +68,6 @@ class DemandPredictor(nn.Module):
         tokens = tokens.reshape(B, h * N, d)                    # [B, h*50, d]
         out = self.encoder(tokens)                              # [B, h*50, d]
 
-        out = out.reshape(B, h, N, d).mean(dim=1)              # [B, 50, d]
-        pred = F.relu(self.head(out).squeeze(-1))               # [B, 50]
-        return pred
+        internal = out.reshape(B, h, N, d).mean(dim=1)         # [B, 50, d]
+        pred = F.relu(self.head(internal).squeeze(-1))          # [B, 50]
+        return pred, internal
