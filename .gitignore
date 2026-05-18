@@ -33,3 +33,5 @@ projects/
 *.ipynb
 
 tmp
+
+CLAUDE.md
