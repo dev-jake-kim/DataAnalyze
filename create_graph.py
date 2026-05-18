@@ -14,7 +14,7 @@ from graph_pipeline.visualization import plot_density_curves, plot_patch_near_de
 def main() -> None:
     config = GraphBuildConfig()
     base_dir = Path(__file__).parent
-    data_dir = base_dir / 'data'
+    data_dir = base_dir / 'data' / 'raw'
     output_dir = base_dir / 'output'
     output_dir.mkdir(exist_ok=True)
 
@@ -35,6 +35,11 @@ def main() -> None:
     )
 
     artifacts = build_graph_data(df, gdf, shapefile_path, poi_csv_path, config)
+    
+    temporal_grid = artifacts.temporal_grid
+    print(f"\nTemporal grid created with shape {temporal_grid.shape}")
+    np.save(output_dir / 'temporal_grid.npy', temporal_grid)
+    print(f"Temporal grid saved to {output_dir / 'temporal_grid.npy'}")
 
     plot_patch_near_demand_map(
         sum_grid=artifacts.sum_grid,

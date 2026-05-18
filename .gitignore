@@ -1,14 +1,33 @@
-.venv/
-data/
-*__pycache__
-*.pyc
-*.pyo
+# Python
+__pycache__/
+*.py[cod]
 *.pyd
-env/
-.idea
+*.so
 
-/data
-/imgs
-output
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Data (원본 데이터 및 전처리 결과)
+data/raw/
+data/processed/
+data/saved/
+
+# 모델 출력 / 시각화
+output/
+
+# 학습 결과 (체크포인트, 로그, 시각화)
+projects/
+
+# Hydra
+.hydra/
+
+# IDE
 .vscode/
+.idea/
 .DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
