@@ -18,6 +18,35 @@ _RECORD_METRICS = ['mae', 'mape', 'rmse']
 _SKIP_EVAL_KEYS = {'loss', 'evaluater', 'runtime', 'samples_per_second', 'steps_per_second'}
 
 
+def append_run_to_csv(csv_path: Path, run_id: str, data: dict) -> None:
+    """
+    run_id 행이 이미 있으면 해당 행에 data 컬럼을 병합(upsert),
+    없으면 새 행으로 추가. 새 컬럼은 기존 행에 NaN으로 확장.
+    """
+    if csv_path.exists():
+        df = pd.read_csv(csv_path)
+    else:
+        df = pd.DataFrame(columns=['run'])
+
+    # 새 컬럼 확장
+    for col in data:
+        if col not in df.columns:
+            df[col] = float('nan')
+
+    mask = df['run'] == run_id
+    if mask.any():
+        for col, val in data.items():
+            df.loc[mask, col] = val
+    else:
+        new_row = {'run': run_id, **data}
+        for col in df.columns:
+            new_row.setdefault(col, float('nan'))
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+    df.to_csv(csv_path, index=False)
+    log.info('Results CSV updated → %s', csv_path)
+
+
 class TrainMetricsCallback(TrainerCallback):
     """
     At the end of training:
@@ -74,36 +103,22 @@ class TrainMetricsCallback(TrainerCallback):
         # Best epoch = lowest eval_evaluater (or last epoch)
         best = min(eval_logs, key=lambda e: e.get('eval_evaluater', float('inf')))
 
-        run_id = '/'.join(Path(args.output_dir).parts[-2:])
-        new_row: dict = {'run': run_id}
-
-        # Fixed metrics (mae, mape, rmse)
+        val_data: dict = {}
         for metric in _RECORD_METRICS:
             key = f'eval_{metric}'
             if key in best:
-                new_row[metric] = best[key]
+                val_data[metric] = best[key]
 
         # Future-proof: pick up any extra eval metrics automatically
         for key, val in best.items():
             if key.startswith('eval_'):
                 col = key[5:]
-                if col not in _SKIP_EVAL_KEYS and col not in new_row:
-                    new_row[col] = val
+                if col not in _SKIP_EVAL_KEYS and col not in val_data:
+                    val_data[col] = val
 
-        project_dir = Path(args.output_dir).parent.parent
-        csv_path = project_dir / 'results.csv'
-
-        if csv_path.exists():
-            df = pd.read_csv(csv_path)
-            for col in new_row:
-                if col not in df.columns:
-                    df[col] = float('nan')
-        else:
-            df = pd.DataFrame(columns=list(new_row.keys()))
-
-        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
-        df.to_csv(csv_path, index=False)
-        log.info('Saved results → %s', csv_path)
+        run_id = '/'.join(Path(args.output_dir).parts[-2:])
+        csv_path = Path(args.output_dir).parent.parent / 'results.csv'
+        append_run_to_csv(csv_path, run_id, val_data)
 
 
 # ------------------------------------------------------------------

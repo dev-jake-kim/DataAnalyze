@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from models.demand_forecast_model import DemandForecastModel, DemandForecastConfig
 from loaders.dataset import DemandDataset, collate_fn
 from runners.test_loop import test_loop
-from runners.training_callbacks import TrainMetricsCallback
+from runners.training_callbacks import TrainMetricsCallback, append_run_to_csv
 
 
 log = logging.getLogger(__name__)
@@ -147,6 +147,11 @@ def run(config):
     
     test_results = test_loop(model, Subset(dataset, test_indices), output_dir, device, **config.test)
     results.append(test_results)
+
+    run_id = '/'.join(Path(output_dir).parts[-2:])
+    csv_path = Path(output_dir).parent.parent / 'results.csv'
+    test_data = {f'test_{k}': v for k, v in test_results.items() if k in ('mae', 'mape', 'rmse')}
+    append_run_to_csv(csv_path, run_id, test_data)
 
 if __name__ == "__main__":
     run()
