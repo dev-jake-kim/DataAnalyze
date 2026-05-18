@@ -31,3 +31,5 @@ projects/
 # Jupyter
 .ipynb_checkpoints/
 *.ipynb
+
+tmp

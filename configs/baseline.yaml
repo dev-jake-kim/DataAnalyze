@@ -35,7 +35,7 @@ test:
 
 callbacks:
   early_stopping:
-    early_stopping_patience: 10
+    early_stopping_patience: 100
     early_stopping_threshold: 0.0001
 
 device: cuda

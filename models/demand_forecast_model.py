@@ -97,9 +97,12 @@ class DemandForecastModel(PreTrainedModel):
     def forward(
         self,
         cell_demands: torch.Tensor,                 # [B, h, 50, 49]  long
-        labels: Optional[torch.Tensor] = None,      # [B, 50]
+        day:          torch.Tensor = None,           # [B, h]  long (0-6)
+        time_idx:     torch.Tensor = None,           # [B, h]  long (0-23)
+        holiday:      torch.Tensor = None,           # [B, h]  long (0-1)
+        labels:       Optional[torch.Tensor] = None, # [B, 50]
     ) -> DemandForecastOutput:
-        node_embed = self.node_embedder(cell_demands)   # [B, h, 50, d]
+        node_embed = self.node_embedder(cell_demands, day, time_idx, holiday)  # [B, h, 50, d]
         pred = self.demand_predictor(node_embed)         # [B, 50]
 
         loss = None

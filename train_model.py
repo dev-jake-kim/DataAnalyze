@@ -48,7 +48,7 @@ def compute_metrics(eval_pred):
     mae = np.mean(np.abs(predictions - labels))
     mape = np.mean(np.abs(predictions - labels) / (labels + 1.0)) * 100.0
     rmse = np.sqrt(np.mean((predictions - labels) ** 2))
-    evaluater = mape + 30 * mae
+    evaluater = mape + 40 * mae
 
     return {
         'mae': float(mae),

@@ -32,9 +32,13 @@ def test_loop(
 
     with torch.no_grad():
         for batch in loader:
-            cell_demands = batch['cell_demands'].to(device)
             labels = batch['labels'].to(device)
-            pred = model(cell_demands=cell_demands).logits
+            pred = model(
+                cell_demands=batch['cell_demands'].to(device),
+                day=batch['day'].to(device),
+                time_idx=batch['time_idx'].to(device),
+                holiday=batch['holiday'].to(device),
+            ).logits
             all_preds.append(pred.cpu().numpy())
             all_labels.append(labels.cpu().numpy())
 
