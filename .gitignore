@@ -10,4 +10,5 @@ env/
 /data
 /imgs
 output
+.vscode/
 .DS_Store
