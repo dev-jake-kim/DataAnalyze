@@ -12,3 +12,9 @@ env/
 output
 .vscode/
 .DS_Store
+.codex/
+.claude/
+.omc/
+.agents/
+CLAUDE.md
+projects/
